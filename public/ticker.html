@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LouiseTicker – On air</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<!--
+  Full-screen news ticker. Use as a browser source (OBS, vMix, CasparCG…).
+  URL options (all optional):
+    out=main          output id
+    speed=110         scroll speed in pixels per second
+    size=34           font size in px (bar height follows)
+    bg=0b0d12         background colour (hex without #) or "transparent"
+    fg=ffffff         text colour
+    accent=e5383b     label / separator colour
+    label=NEWS        text of the left label block ("none" to hide)
+    clock=24          clock: 0 = hide, 12 / 24 = hour format (default: the output's clock settings)
+    tz=Europe/Paris   time zone for the clock (default: output setting, else this computer's time)
+    clocklabel=PARIS  text shown before the time
+    seconds=1         show seconds
+    font=Arial        font family
+    position=bottom   bottom | top | fill
+    source=badge      how to show the source: badge | prefix | suffix | none
+                      (default: the "Show the source" setting of the output)
+    sourcecolor=feed  badge colour: feed (each feed's own colour) or a hex colour
+-->
+<style>
+  :root { --size: 34px; --bg: #0b0d12; --fg: #fff; --accent: #e5383b; --font: "Segoe UI", Arial, sans-serif; }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body { display: flex; flex-direction: column; justify-content: flex-end; font-family: var(--font); }
+  body.top { justify-content: flex-start; }
+  .bar {
+    height: calc(var(--size) * 1.75); display: flex; align-items: stretch; background: var(--bg); color: var(--fg);
+    font-size: var(--size); font-weight: 600; line-height: 1; overflow: hidden;
+  }
+  body.fill .bar { height: 100%; }
+  .label {
+    background: var(--accent); color: #fff; display: flex; align-items: center; padding: 0 .6em; font-weight: 800;
+    letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; z-index: 2; box-shadow: 6px 0 14px rgba(0,0,0,.35);
+  }
+  .label.breaking { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { filter: brightness(1.35); } }
+  .viewport { position: relative; flex: 1; overflow: hidden; display: flex; align-items: center; }
+  .track { display: flex; white-space: nowrap; will-change: transform; }
+  .seq { display: flex; align-items: center; flex: none; }
+  .item { display: inline-flex; align-items: center; gap: .45em; }
+  .brk { background: var(--accent); color: #fff; font-size: .62em; font-weight: 800; padding: .22em .45em; border-radius: .2em; letter-spacing: .05em; }
+  .src { font-size: .62em; font-weight: 800; padding: .22em .45em; border-radius: .2em; letter-spacing: .04em; text-transform: uppercase; }
+  .srctxt { opacity: .7; }
+  .sep { color: var(--accent); white-space: pre; }
+  .clock {
+    display: flex; align-items: center; padding: 0 .55em; background: rgba(255,255,255,.08); font-variant-numeric: tabular-nums; z-index: 2;
+    font-weight: 700; white-space: nowrap;
+  }
+  .clock .ampm { font-size: .6em; margin-left: .2em; align-self: center; }
+  .clock .clabel { font-size: .55em; opacity: .75; margin-right: .5em; letter-spacing: .08em; text-transform: uppercase; }
+  .idle { opacity: .45; font-weight: 400; font-size: .7em; padding-left: .6em; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <div class="label" id="label">News</div>
+    <div class="viewport" id="viewport"><div class="track" id="track"></div></div>
+    <div class="clock" id="clock"></div>
+  </div>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const out = q.get('out') || 'main';
+  const embed = q.get('embed') === '1';
+  const speed = +(q.get('speed') || 110);
+  const root = document.documentElement.style;
+  const hex = (v) => (/^[0-9a-f]{3,8}$/i.test(v) ? '#' + v : v);
+  if (q.get('size') || embed) root.setProperty('--size', (q.get('size') || (embed ? 22 : 34)) + 'px');
+  if (q.get('bg')) root.setProperty('--bg', hex(q.get('bg')));
+  if (q.get('fg')) root.setProperty('--fg', hex(q.get('fg')));
+  if (q.get('accent')) root.setProperty('--accent', hex(q.get('accent')));
+  if (q.get('font')) root.setProperty('--font', q.get('font'));
+  const pos = q.get('position') || (embed ? 'fill' : 'bottom');
+  document.body.classList.add(pos);
+  const labelText = q.get('label') || 'News';
+  const labelEl = document.getElementById('label');
+  if (labelText === 'none') labelEl.remove();
+  const clockEl = document.getElementById('clock');
+  let clockSettings = null;
+
+  const track = document.getElementById('track');
+  const viewport = document.getElementById('viewport');
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  let data = null, sig = '', pending = null, x = 0, seqW = 0, last = performance.now();
+
+  function seqHtml(d) {
+    if (!d || !d.items.length) return `<span class="idle">${embed ? 'Nothing on air — select stories to build the ticker' : ''}</span>`;
+    const sep = `<span class="sep">${esc(d.separator || '  •  ')}</span>`;
+    const mode = sourceMode || d.sourceStyle || 'none';
+    return d.items.map((it) => {
+      const title = esc(it.title ?? it.headline);
+      const src = esc(d.uppercase ? (it.source || '').toUpperCase() : it.source || '');
+      let body = `<span>${title}</span>`;
+      if (src && mode === 'badge') body = `${badge(src, it.sourceColor)}${body}`;
+      if (src && mode === 'prefix') body = `<span><span class="srctxt">${src}:</span> ${title}</span>`;
+      if (src && mode === 'suffix') body = `<span>${title} <span class="srctxt">(${src})</span></span>`;
+      const brk = it.breaking && d.breakingLabel ? `<span class="brk">${esc(d.uppercase ? d.breakingLabel.toUpperCase() : d.breakingLabel)}</span>` : '';
+      return `<span class="item">${brk}${body}</span>${sep}`;
+    }).join('');
+  }
+
+  const sourceMode = q.get('source');
+  const sourceColor = q.get('sourcecolor');
+  function badge(text, feedColor) {
+    const bg = sourceColor && sourceColor !== 'feed' ? hex(sourceColor) : feedColor || 'rgba(255,255,255,.18)';
+    // dark text on light colours so the label stays readable
+    const m = /^#([0-9a-f]{6})$/i.exec(bg);
+    const light = m && (() => { const n = parseInt(m[1], 16); return (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) > 160; })();
+    return `<span class="src" style="background:${esc(bg)};color:${light ? '#111' : '#fff'}">${text}</span>`;
+  }
+
+  function build(d) {
+    data = d;
+    const hasBreaking = d && d.items.some((i) => i.breaking);
+    if (labelEl.isConnected) {
+      labelEl.textContent = hasBreaking && d.breakingLabel ? d.breakingLabel : labelText;
+      labelEl.classList.toggle('breaking', !!hasBreaking);
+    }
+    track.innerHTML = `<div class="seq">${seqHtml(d)}</div>`;
+    seqW = track.firstElementChild.getBoundingClientRect().width;
+    if (!d || !d.items.length) { x = 0; track.style.transform = 'translateX(0)'; seqW = 0; return; }
+    const copies = Math.max(2, Math.ceil(viewport.clientWidth / Math.max(seqW, 1)) + 1);
+    track.innerHTML = Array(copies).fill(`<div class="seq">${seqHtml(d)}</div>`).join('');
+    if (-x >= seqW) x = 0;
+  }
+
+  function frame(t) {
+    const dt = Math.min(0.1, (t - last) / 1000);
+    last = t;
+    if (seqW > 0) {
+      x -= speed * dt;
+      if (-x >= seqW) {
+        x += seqW;
+        // swap in new content only at a loop boundary so the scroll never jumps
+        if (pending) { const p = pending; pending = null; build(p); }
+      }
+      track.style.transform = `translate3d(${x.toFixed(2)}px,0,0)`;
+    } else if (pending) { const p = pending; pending = null; build(p); }
+    requestAnimationFrame(frame);
+  }
+
+  async function load() {
+    try {
+      const r = await fetch(`/out/${encodeURIComponent(out)}.json`, { cache: 'no-store' });
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      if (JSON.stringify(d.clock) !== JSON.stringify(clockSettings)) { clockSettings = d.clock || null; tick(); }
+      const s = JSON.stringify([d.items.map((i) => [i.id, i.headline, i.breaking, i.sourceColor]), d.separator, d.breakingLabel, d.sourceStyle]);
+      if (s === sig) return;
+      sig = s;
+      // first load, or empty → show immediately; otherwise wait for the loop point
+      if (!data || !data.items.length || !d.items.length) build(d); else pending = d;
+      // breaking items arriving: switch right away
+      if (d.items.some((i) => i.breaking) && !data.items.some((i) => i.breaking)) { pending = null; build(d); }
+    } catch { /* keep showing what we have */ }
+  }
+
+  // Clock: output settings, overridable per page with clock=0|1|12|24, tz=, clocklabel=, seconds=0|1
+  let fmtKey = '', fmt = null;
+  function clockConfig() {
+    const c = clockSettings || {};
+    const p = q.get('clock');
+    return {
+      show: p === '0' ? false : p ? true : c.show !== false,
+      format: p === '12' || p === '24' ? p + 'h' : c.format || '24h',
+      tz: q.get('tz') || c.timezone || '',
+      label: q.has('clocklabel') ? q.get('clocklabel') : c.label || '',
+      seconds: q.has('seconds') ? q.get('seconds') === '1' : !!c.seconds,
+    };
+  }
+  function tick() {
+    const c = clockConfig();
+    clockEl.style.display = c.show ? '' : 'none';
+    if (!c.show) return;
+    const key = JSON.stringify(c);
+    if (key !== fmtKey) {
+      fmtKey = key;
+      const opts = {
+        hour: c.format === '12h' ? 'numeric' : '2-digit', minute: '2-digit', second: c.seconds ? '2-digit' : undefined,
+        hourCycle: c.format === '12h' ? 'h12' : 'h23',
+      };
+      try { fmt = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: c.tz || undefined }); }
+      catch { fmt = new Intl.DateTimeFormat('en-US', opts); } // unknown zone: fall back to local time
+    }
+    const time = fmt.formatToParts(new Date())
+      .map((p) => (p.type === 'dayPeriod' ? `<span class="ampm">${p.value}</span>` : p.type === 'literal' && /^\s+$/.test(p.value) ? '' : esc(p.value)))
+      .join('');
+    clockEl.innerHTML = `${c.label ? `<span class="clabel">${esc(c.label)}</span>` : ''}${time}`;
+  }
+
+  load();
+  setInterval(load, 15000);
+  tick(); setInterval(tick, 1000);
+  try {
+    const es = new EventSource('/api/events');
+    es.addEventListener('output', (e) => { const d = JSON.parse(e.data || '{}'); if (d.id === out) load(); });
+    es.addEventListener('feed', () => {});
+  } catch {}
+  addEventListener('resize', () => data && build(data));
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

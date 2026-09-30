@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LouiseTicker</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icon.svg" alt="" width="26" height="26">
+      <span>Louise<b>Ticker</b></span>
+      <span class="live-dot" id="liveDot" title="Live connection to server"></span>
+    </div>
+    <div class="top-actions">
+      <button class="btn primary" id="btnAddFeed" title="Subscribe to a feed (A)">＋ Add feed</button>
+      <button class="btn" id="btnRefreshAll" title="Refresh all feeds (R)">⟳ Refresh all</button>
+      <button class="btn" id="btnSplit" title="Add a pane (split view)">◫ Split</button>
+      <button class="btn" id="btnSettings" title="Feeds &amp; settings">⚙ Settings</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panes" id="panes"></section>
+
+    <aside class="output-panel" id="outputPanel">
+      <div class="op-head">
+        <label class="op-label" for="outputSelect">Output</label>
+        <select id="outputSelect"></select>
+        <button class="icon-btn" id="btnNewOutput" title="New output feed">＋</button>
+        <button class="icon-btn" id="btnOutputSettings" title="Output settings &amp; auto-rules">⚙</button>
+      </div>
+      <div class="op-endpoints" id="endpoints"></div>
+      <form class="op-custom" id="customForm" autocomplete="off">
+        <input id="customText" placeholder="Type a custom ticker line (e.g. weather, promo)…" maxlength="400">
+        <label class="chk" title="Mark as breaking"><input type="checkbox" id="customBreaking"> ⚡</label>
+        <button class="btn small">Add</button>
+      </form>
+      <div class="op-stats" id="opStats"></div>
+      <ol class="entries" id="entries"></ol>
+      <div class="op-foot">
+        <button class="btn small" id="btnCopyTo">Copy to output…</button>
+        <button class="btn small danger" id="btnClear">Clear all</button>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="preview">
+    <span class="preview-label">ON AIR PREVIEW</span>
+    <iframe id="previewFrame" title="Ticker preview"></iframe>
+  </footer>
+
+  <dialog id="modal"><div id="modalBody"></div></dialog>
+  <div id="toasts"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

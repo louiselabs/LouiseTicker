@@ -1,0 +1,15 @@
+{
+  "name": "louiseticker",
+  "version": "1.0.0",
+  "description": "Subscribe to RSS feeds, pick stories in a tabbed interface, and compile them into an output RSS feed for a TV news ticker.",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "start:lan": "node -e \"process.env.LAN='1';require('./server.js')\"",
+    "test": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
