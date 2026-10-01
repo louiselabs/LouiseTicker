@@ -30,11 +30,13 @@
         <label class="op-label" for="outputSelect">Output</label>
         <select id="outputSelect"></select>
         <button class="icon-btn" id="btnNewOutput" title="New output feed">＋</button>
+        <button class="icon-btn" id="btnDesigner" title="Ticker designer: appearance &amp; layout">🎨</button>
         <button class="icon-btn" id="btnOutputSettings" title="Output settings &amp; auto-rules">⚙</button>
       </div>
       <div class="op-endpoints" id="endpoints"></div>
       <form class="op-custom" id="customForm" autocomplete="off">
         <input id="customText" placeholder="Type a custom ticker line (e.g. weather, promo)…" maxlength="400">
+        <select id="customCategory" title="Category" class="cat-select"></select>
         <label class="chk" title="Mark as breaking"><input type="checkbox" id="customBreaking"> ⚡</label>
         <button class="btn small">Add</button>
       </form>
@@ -55,6 +57,7 @@
   <dialog id="modal"><div id="modalBody"></div></dialog>
   <div id="toasts"></div>
 
+  <script src="categorize.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

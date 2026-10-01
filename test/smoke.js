@@ -43,4 +43,19 @@ assert.deepStrictEqual(discoverFeeds(html, 'https://site.example/news/'), [{ url
 assert.throws(() => parseFeed('<html>nope</html>', 'x'));
 assert.strictEqual(escapeXml('a<b>&"\u0001'), 'a&lt;b&gt;&amp;&quot;');
 
+// Categories: feed default first, then the first category whose match words appear in RSS tags or the URL
+const { categorize } = require('../public/categorize');
+const cats = [
+  { id: 'weather', match: ['weather', 'météo'] },
+  { id: 'sport', match: ['sport', 'football', 'formula 1'] },
+  { id: 'world', match: ['world'] },
+];
+assert.strictEqual(categorize({ link: 'https://www.bbc.co.uk/sport/football/articles/x' }, null, cats), 'sport');
+assert.strictEqual(categorize({ categories: ['Formula 1 - Grand Prix'] }, null, cats), 'sport');
+assert.strictEqual(categorize({ categories: ['Météo'] }, null, cats), 'weather');
+assert.strictEqual(categorize({ link: 'https://www.bbc.co.uk/news/world-europe-123' }, null, cats), 'world');
+assert.strictEqual(categorize({ link: 'https://example.com/news/uk-1' }, null, cats), null);
+assert.strictEqual(categorize({ link: 'https://example.com/sport/1' }, { category: 'weather' }, cats), 'weather');
+assert.strictEqual(categorize({ categories: ['Sportswear'] }, null, cats), null, 'whole words only');
+
 console.log('All parser tests passed');

@@ -7,51 +7,92 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <!--
   Full-screen news ticker. Use as a browser source (OBS, vMix, CasparCG…).
-  URL options (all optional):
+  Appearance comes from the output's Ticker designer settings in LouiseTicker.
+  Any of them can be overridden for one screen with URL options:
     out=main          output id
-    speed=110         scroll speed in pixels per second
+    mode=flip         crawl | flip (one headline at a time)
+    speed=110         crawl speed in pixels per second
+    flip=6            seconds each headline stays up in flip mode
+    transition=slide  slide | push | fade | none
     size=34           font size in px (bar height follows)
     bg=0b0d12         background colour (hex without #) or "transparent"
     fg=ffffff         text colour
-    accent=e5383b     label / separator colour
+    accent=e5383b     separator / breaking colour
     label=NEWS        text of the left label block ("none" to hide)
-    clock=24          clock: 0 = hide, 12 / 24 = hour format (default: the output's clock settings)
-    tz=Europe/Paris   time zone for the clock (default: output setting, else this computer's time)
-    clocklabel=PARIS  text shown before the time
-    seconds=1         show seconds
     font=Arial        font family
     position=bottom   bottom | top | fill
+    clock=24          clock: 0 = hide, 12 / 24 = hour format
+    tz=Europe/Paris   time zone for the clock
+    clocklabel=PARIS  text shown before the time
+    seconds=1         show seconds
     source=badge      how to show the source: badge | prefix | suffix | none
-                      (default: the "Show the source" setting of the output)
     sourcecolor=feed  badge colour: feed (each feed's own colour) or a hex colour
+    category=badge    how to show the category: badge | text | label | none
+    lines=2           one-at-a-time mode: let headlines wrap onto up to 2–4 lines (1 = single line)
+    grow=1            with lines>1 and automatic height: bar grows with each headline
 -->
 <style>
-  :root { --size: 34px; --bg: #0b0d12; --fg: #fff; --accent: #e5383b; --font: "Segoe UI", Arial, sans-serif; }
+  :root {
+    --size: 34px; --lines: 1; --h: calc(var(--size) * (1.15 * var(--lines) + .6)); --bg: #0b0d12; --fg: #fff; --accent: #e5383b;
+    --label-bg: #e5383b; --label-fg: #fff; --clock-bg: #1d2028; --clock-fg: #fff;
+    --font: "Segoe UI", Arial, sans-serif; --weight: 600; --margin: 0px; --radius: 0px; --dur: .5s;
+  }
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
   body { display: flex; flex-direction: column; justify-content: flex-end; font-family: var(--font); }
   body.top { justify-content: flex-start; }
+  body.stage { background: linear-gradient(135deg, #2b3a55 0%, #46556f 40%, #7b6f63 100%); }
+  body.stage::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 38%, rgba(255,255,255,.18), transparent 45%), repeating-linear-gradient(90deg, rgba(255,255,255,.03) 0 2px, transparent 2px 120px);
+  }
   .bar {
-    height: calc(var(--size) * 1.75); display: flex; align-items: stretch; background: var(--bg); color: var(--fg);
-    font-size: var(--size); font-weight: 600; line-height: 1; overflow: hidden;
+    position: relative; height: var(--h); margin: var(--margin); border-radius: var(--radius);
+    display: flex; align-items: stretch; background: var(--bg); color: var(--fg);
+    font-size: var(--size); font-weight: var(--weight); line-height: 1; overflow: hidden; transition: height .35s ease;
   }
-  body.fill .bar { height: 100%; }
+  body.shadow .bar { box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+  body.fill .bar { height: auto; flex: 1; margin: 0; border-radius: 0; }
+  .logo { height: 100%; width: auto; display: block; object-fit: contain; padding: .15em .4em; box-sizing: border-box; background: var(--label-bg); }
+  .logo[hidden] { display: none; }
   .label {
-    background: var(--accent); color: #fff; display: flex; align-items: center; padding: 0 .6em; font-weight: 800;
-    letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; z-index: 2; box-shadow: 6px 0 14px rgba(0,0,0,.35);
+    background: var(--label-bg); color: var(--label-fg); display: flex; align-items: center; padding: 0 .6em; font-weight: 800;
+    letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; z-index: 2; transition: background-color .3s, color .3s;
   }
-  .label.breaking { animation: pulse 1.2s ease-in-out infinite; }
+  body.shadow .label { box-shadow: 6px 0 14px rgba(0,0,0,.35); }
+  .label[hidden] { display: none; }
+  body.pulse .label.breaking { animation: pulse 1.2s ease-in-out infinite; }
+  .label.breaking { background: var(--accent); color: #fff; }
   @keyframes pulse { 50% { filter: brightness(1.35); } }
   .viewport { position: relative; flex: 1; overflow: hidden; display: flex; align-items: center; }
   .track { display: flex; white-space: nowrap; will-change: transform; }
   .seq { display: flex; align-items: center; flex: none; }
-  .item { display: inline-flex; align-items: center; gap: .45em; }
+  .item { display: inline-flex; align-items: center; gap: .45em; white-space: nowrap; }
   .brk { background: var(--accent); color: #fff; font-size: .62em; font-weight: 800; padding: .22em .45em; border-radius: .2em; letter-spacing: .05em; }
   .src { font-size: .62em; font-weight: 800; padding: .22em .45em; border-radius: .2em; letter-spacing: .04em; text-transform: uppercase; }
   .srctxt { opacity: .7; }
+  .cattxt { font-weight: 800; text-transform: uppercase; letter-spacing: .03em; }
+  .cattxt::after { content: "|"; color: var(--fg); opacity: .35; font-weight: 400; margin-left: .45em; }
   .sep { color: var(--accent); white-space: pre; }
+
+  /* one-at-a-time mode */
+  .flip { position: absolute; inset: 0; }
+  .slide { position: absolute; inset: 0; display: flex; align-items: center; padding-left: .55em; transition: transform var(--dur) ease, opacity var(--dur) ease; }
+  .slide .inner { display: inline-flex; will-change: transform; }
+  /* multi-line headlines: text wraps, badges flow inline with the words */
+  .slide.multi { padding-right: .55em; }
+  .slide.multi .inner { display: block; white-space: normal; line-height: 1.15; overflow: hidden; width: 100%; }
+  .slide.multi .inner.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--clamp, 2); }
+  .slide.multi .item { display: inline; white-space: normal; }
+  .slide.multi .brk, .slide.multi .src { display: inline-block; line-height: 1; vertical-align: .14em; margin-right: .4em; }
+  .slide.multi .cattxt { margin-right: .45em; }
+  .t-slide.enter { transform: translateY(100%); } .t-slide.leave { transform: translateY(-100%); }
+  .t-push.enter { transform: translateX(100%); } .t-push.leave { transform: translateX(-100%); }
+  .t-fade.enter, .t-fade.leave { opacity: 0; }
+  .t-none { transition: none; }
+
   .clock {
-    display: flex; align-items: center; padding: 0 .55em; background: rgba(255,255,255,.08); font-variant-numeric: tabular-nums; z-index: 2;
-    font-weight: 700; white-space: nowrap;
+    display: flex; align-items: center; padding: 0 .55em; background: var(--clock-bg); color: var(--clock-fg);
+    font-variant-numeric: tabular-nums; z-index: 2; font-weight: 700; white-space: nowrap;
   }
   .clock .ampm { font-size: .6em; margin-left: .2em; align-self: center; }
   .clock .clabel { font-size: .55em; opacity: .75; margin-right: .5em; letter-spacing: .08em; text-transform: uppercase; }
@@ -60,91 +101,359 @@
 </head>
 <body>
   <div class="bar">
+    <img class="logo" id="logo" alt="" hidden>
     <div class="label" id="label">News</div>
-    <div class="viewport" id="viewport"><div class="track" id="track"></div></div>
+    <div class="viewport" id="viewport"><div class="track" id="track"></div><div class="flip" id="flip"></div></div>
     <div class="clock" id="clock"></div>
   </div>
 <script>
 (() => {
   const q = new URLSearchParams(location.search);
   const out = q.get('out') || 'main';
-  const embed = q.get('embed') === '1';
-  const speed = +(q.get('speed') || 110);
-  const root = document.documentElement.style;
-  const hex = (v) => (/^[0-9a-f]{3,8}$/i.test(v) ? '#' + v : v);
-  if (q.get('size') || embed) root.setProperty('--size', (q.get('size') || (embed ? 22 : 34)) + 'px');
-  if (q.get('bg')) root.setProperty('--bg', hex(q.get('bg')));
-  if (q.get('fg')) root.setProperty('--fg', hex(q.get('fg')));
-  if (q.get('accent')) root.setProperty('--accent', hex(q.get('accent')));
-  if (q.get('font')) root.setProperty('--font', q.get('font'));
-  const pos = q.get('position') || (embed ? 'fill' : 'bottom');
-  document.body.classList.add(pos);
-  const labelText = q.get('label') || 'News';
-  const labelEl = document.getElementById('label');
-  if (labelText === 'none') labelEl.remove();
-  const clockEl = document.getElementById('clock');
-  let clockSettings = null;
-
-  const track = document.getElementById('track');
-  const viewport = document.getElementById('viewport');
+  const embed = q.get('embed') === '1';   // small strip inside the control panel
+  const stage = q.get('stage') === '1';   // designer preview: sample background + sample headlines
+  const $ = (id) => document.getElementById(id);
+  const labelEl = $('label'), clockEl = $('clock'), logoEl = $('logo');
+  const track = $('track'), flipEl = $('flip'), viewport = $('viewport');
+  const rootStyle = document.documentElement.style;
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const hex = (v) => (/^[0-9a-f]{3,8}$/i.test(v) ? '#' + v : v);
 
-  let data = null, sig = '', pending = null, x = 0, seqW = 0, last = performance.now();
+  const SAMPLE = {
+    separator: '  •  ', breakingLabel: 'BREAKING', uppercase: false, sourceStyle: 'badge', categoryStyle: 'badge',
+    items: [
+      { id: 's1', title: 'Storm warning issued for the north coast as winds are expected to reach 120 km/h overnight, with ferries cancelled and schools closing early', source: 'Met Office', sourceColor: '#5f6778', breaking: true, category: { name: 'Weather', color: '#29a3d6' } },
+      { id: 's2', title: 'Parliament approves the new transport budget after a late-night vote', source: 'BBC', sourceColor: '#e4572e', category: { name: 'Politics', color: '#b86bd6' } },
+      { id: 's3', title: 'Local team wins the championship final 3–1', source: 'Sky', sourceColor: '#3b6fd6', category: { name: 'Sport', color: '#1e8f4e' } },
+      { id: 's4', title: 'Markets close higher as tech shares rally', source: 'Reuters', sourceColor: '#d98c4a', category: { name: 'Business', color: '#f2b134' } },
+    ],
+  };
 
-  function seqHtml(d) {
-    if (!d || !d.items.length) return `<span class="idle">${embed ? 'Nothing on air — select stories to build the ticker' : ''}</span>`;
-    const sep = `<span class="sep">${esc(d.separator || '  •  ')}</span>`;
-    const mode = sourceMode || d.sourceStyle || 'none';
-    return d.items.map((it) => {
-      const title = esc(it.title ?? it.headline);
-      const src = esc(d.uppercase ? (it.source || '').toUpperCase() : it.source || '');
-      let body = `<span>${title}</span>`;
-      if (src && mode === 'badge') body = `${badge(src, it.sourceColor)}${body}`;
-      if (src && mode === 'prefix') body = `<span><span class="srctxt">${src}:</span> ${title}</span>`;
-      if (src && mode === 'suffix') body = `<span>${title} <span class="srctxt">(${src})</span></span>`;
-      const brk = it.breaking && d.breakingLabel ? `<span class="brk">${esc(d.uppercase ? d.breakingLabel.toUpperCase() : d.breakingLabel)}</span>` : '';
-      return `<span class="item">${brk}${body}</span>${sep}`;
-    }).join('');
+  // ------------------------------------------------------------ settings: server ⊕ URL ⊕ designer preview
+  let serverLook = {}, previewLook = null, serverClock = null, previewClock = null, previewSettings = null;
+  let data = null, sig = '';
+
+  // label styles: URL option, then designer preview, then the output's setting
+  const styleOf = (d, key, param) => q.get(param) || (previewSettings && previewSettings[key]) || (d && d[key]) || 'none';
+
+  function urlLook() {
+    const o = {};
+    const map = { mode: 'mode', speed: 'speed', flip: 'flipSeconds', transition: 'transition', size: 'fontSize', fg: 'fg', accent: 'accent', font: 'fontFamily', position: 'position' };
+    for (const [p, k] of Object.entries(map)) if (q.has(p)) o[k] = /^(fg|accent)$/.test(k) ? hex(q.get(p)) : /^(speed|flipSeconds|fontSize)$/.test(k) ? +q.get(p) : q.get(p);
+    if (q.has('bg')) { if (q.get('bg') === 'transparent') o.bgOpacity = 0; else o.bg = hex(q.get('bg')); }
+    if (q.has('label')) { if (q.get('label') === 'none') o.showLabel = false; else { o.showLabel = true; o.labelText = q.get('label'); } }
+    if (q.has('sourcecolor')) o.badgeColor = q.get('sourcecolor') === 'feed' ? '' : hex(q.get('sourcecolor'));
+    if (q.has('lines')) { o.maxLines = Math.min(4, Math.max(1, +q.get('lines') || 1)); o.multiline = o.maxLines > 1; }
+    if (q.has('grow')) o.grow = q.get('grow') === '1';
+    return o;
+  }
+  const look = () => {
+    const l = { ...serverLook, ...(previewLook || {}), ...urlLook() };
+    if (embed) Object.assign(l, { position: 'fill', fontSize: 22, height: 0, margin: 0, radius: 0 });
+    return l;
+  };
+
+  function rgba(h, opacity) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(h || '');
+    if (!m) return h;
+    const n = parseInt(m[1], 16);
+    return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${(opacity ?? 100) / 100})`;
   }
 
-  const sourceMode = q.get('source');
-  const sourceColor = q.get('sourcecolor');
-  function badge(text, feedColor) {
-    const bg = sourceColor && sourceColor !== 'feed' ? hex(sourceColor) : feedColor || 'rgba(255,255,255,.18)';
-    // dark text on light colours so the label stays readable
-    const m = /^#([0-9a-f]{6})$/i.exec(bg);
-    const light = m && (() => { const n = parseInt(m[1], 16); return (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) > 160; })();
-    return `<span class="src" style="background:${esc(bg)};color:${light ? '#111' : '#fff'}">${text}</span>`;
-  }
-
-  function build(d) {
-    data = d;
-    const hasBreaking = d && d.items.some((i) => i.breaking);
-    if (labelEl.isConnected) {
-      labelEl.textContent = hasBreaking && d.breakingLabel ? d.breakingLabel : labelText;
-      labelEl.classList.toggle('breaking', !!hasBreaking);
+  let appliedKey = '';
+  const GOOGLE_FONTS = ['Roboto Condensed', 'Barlow Condensed', 'Oswald', 'Roboto', 'Inter', 'Montserrat', 'Open Sans', 'Source Sans 3'];
+  function fontStack(f) {
+    f = (f || '').trim();
+    if (!f) return '"Segoe UI", Arial, sans-serif';
+    if (f.includes(',')) return f;
+    const name = f.replace(/["']/g, '');
+    if (GOOGLE_FONTS.includes(name) && !document.querySelector(`link[data-font="${name}"]`)) {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.dataset.font = name;
+      link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(name)}:wght@400;600;700;800&display=swap`;
+      // re-measure once the font has arrived
+      link.onload = () => document.fonts.load(`700 20px "${name}"`).then(() => { appliedKey = ''; applyLook(); });
+      document.head.append(link);
     }
-    track.innerHTML = `<div class="seq">${seqHtml(d)}</div>`;
+    return `"${name}", "Segoe UI", Arial, sans-serif`;
+  }
+
+  let L = {}; // current effective look
+  function applyLook() {
+    const l = (L = look());
+    const set = (k, v) => v != null && v !== '' && rootStyle.setProperty(k, v);
+    set('--size', (l.fontSize || 34) + 'px');
+    rootStyle.setProperty('--h', l.height > 0 ? l.height + 'px' : 'calc(var(--size) * (1.15 * var(--lines) + .6))');
+    // automatic height fits the max number of lines; "grow" mode sets it per headline in flipShow
+    rootStyle.setProperty('--lines', multi() && !l.grow ? Math.max(1, l.maxLines || 2) : 1);
+    set('--bg', rgba(l.bg || '#0b0d12', l.bgOpacity));
+    set('--fg', l.fg); set('--accent', l.accent);
+    set('--label-bg', l.labelBg); set('--label-fg', l.labelFg);
+    set('--clock-bg', l.clockBg); set('--clock-fg', l.clockFg);
+    set('--font', fontStack(l.fontFamily)); set('--weight', l.fontWeight);
+    set('--margin', (l.margin || 0) + 'px'); set('--radius', (l.radius || 0) + 'px');
+    document.body.className = [l.position || 'bottom', stage ? 'stage' : '', l.shadow !== false ? 'shadow' : '', l.breakingPulse !== false ? 'pulse' : ''].join(' ');
+    labelEl.hidden = l.showLabel === false;
+    if (l.logoUrl) { if (logoEl.getAttribute('src') !== l.logoUrl) logoEl.src = l.logoUrl; logoEl.hidden = false; } else logoEl.hidden = true;
+    updateLabel();
+    tick();
+    // anything that changes text size or the engine needs a full re-layout
+    const key = JSON.stringify([l.mode, l.fontSize, l.fontFamily, l.fontWeight, l.height, l.margin, l.showLabel, l.labelText, l.logoUrl, l.badgeColor, l.transition, l.multiline, l.maxLines, l.grow, previewSettings]);
+    if (key !== appliedKey) { appliedKey = key; restart(); }
+  }
+
+  // multi-line headlines only make sense when headlines are shown one at a time
+  const multi = () => L.mode === 'flip' && !!L.multiline && (L.maxLines || 2) > 1;
+  // in one-at-a-time mode the label block can show the current headline's category
+  const categoryInLabel = (d) => L.mode === 'flip' && L.showLabel !== false && styleOf(d, 'categoryStyle', 'category') === 'label';
+
+  // the designer preview shows sample headlines when nothing is on air yet
+  const shown = () => ((data && data.items.length) || !stage ? data : { ...SAMPLE, separator: (data && data.separator) || SAMPLE.separator });
+
+  // ------------------------------------------------------------ item markup
+  const isLight = (c) => {
+    const m = /^#([0-9a-f]{6})$/i.exec(c || '');
+    if (!m) return false;
+    const n = parseInt(m[1], 16);
+    return 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) > 160;
+  };
+  // coloured tag; dark text on light colours so it stays readable
+  const pill = (text, bg) => `<span class="src" style="background:${esc(bg)};color:${isLight(bg) ? '#111' : '#fff'}">${text}</span>`;
+  const badge = (text, feedColor) => pill(text, L.badgeColor || feedColor || 'rgba(255,255,255,.18)');
+
+  function itemHtml(it, d) {
+    const mode = styleOf(d, 'sourceStyle', 'source');
+    const cmode = styleOf(d, 'categoryStyle', 'category');
+    const up = (s) => esc(d.uppercase ? String(s || '').toUpperCase() : s || '');
+    const title = esc(it.title ?? it.headline);
+    const src = up(it.source);
+    let body = `<span>${title}</span>`;
+    if (src && mode === 'badge') body = `${badge(src, it.sourceColor)}${body}`;
+    if (src && mode === 'prefix') body = `<span><span class="srctxt">${src}:</span> ${title}</span>`;
+    if (src && mode === 'suffix') body = `<span>${title} <span class="srctxt">(${src})</span></span>`;
+    let cat = '';
+    if (it.category && cmode !== 'none' && !(cmode === 'label' && categoryInLabel(d))) {
+      cat = cmode === 'text' ? `<span class="cattxt" style="color:${esc(it.category.color)}">${up(it.category.name)}</span>` : pill(up(it.category.name), it.category.color);
+    }
+    // one at a time with a label block: the label itself says BREAKING, so no second tag
+    const labelSaysIt = L.mode === 'flip' && L.showLabel !== false;
+    const brk = it.breaking && d.breakingLabel && !labelSaysIt ? `<span class="brk">${up(d.breakingLabel)}</span>` : '';
+    return `<span class="item">${brk}${cat}${body}</span>`;
+  }
+  const idleHtml = () => `<span class="idle">${embed ? 'Nothing on air — select stories to build the ticker' : ''}</span>`;
+
+  let currentItem = null; // headline on screen in one-at-a-time mode
+  function updateLabel() {
+    const d = shown();
+    let text = L.labelText || 'News', bg = '', breaking = false;
+    if (L.mode === 'flip') {
+      // one at a time: the label follows the headline on screen —
+      // breaking label only while a breaking headline is up, else its category (label style), else the normal label
+      if (currentItem && currentItem.breaking && d && d.breakingLabel) { text = d.breakingLabel; breaking = true; }
+      else if (currentItem && currentItem.category && d && categoryInLabel(d)) { text = currentItem.category.name; bg = currentItem.category.color; }
+    } else if (d && d.items.some((i) => i.breaking) && d.breakingLabel) {
+      // crawl: everything scrolls past together, so flag the whole bar
+      text = d.breakingLabel; breaking = true;
+    }
+    labelEl.textContent = text;
+    labelEl.classList.toggle('breaking', breaking);
+    labelEl.style.background = bg;
+    labelEl.style.color = bg ? (isLight(bg) ? '#111' : '#fff') : '';
+  }
+
+  // ------------------------------------------------------------ crawl engine
+  let x = 0, seqW = 0, pending = null, last = performance.now();
+
+  function crawlBuild() {
+    const d = shown();
+    flipEl.innerHTML = '';
+    if (!d || !d.items.length) { track.innerHTML = idleHtml(); seqW = 0; x = 0; track.style.transform = 'translateX(0)'; return; }
+    const sep = `<span class="sep">${esc(d.separator || '  •  ')}</span>`;
+    const seq = `<div class="seq">${d.items.map((it) => itemHtml(it, d) + sep).join('')}</div>`;
+    track.innerHTML = seq;
     seqW = track.firstElementChild.getBoundingClientRect().width;
-    if (!d || !d.items.length) { x = 0; track.style.transform = 'translateX(0)'; seqW = 0; return; }
     const copies = Math.max(2, Math.ceil(viewport.clientWidth / Math.max(seqW, 1)) + 1);
-    track.innerHTML = Array(copies).fill(`<div class="seq">${seqHtml(d)}</div>`).join('');
+    track.innerHTML = seq.repeat(copies);
     if (-x >= seqW) x = 0;
   }
 
   function frame(t) {
     const dt = Math.min(0.1, (t - last) / 1000);
     last = t;
-    if (seqW > 0) {
-      x -= speed * dt;
-      if (-x >= seqW) {
-        x += seqW;
-        // swap in new content only at a loop boundary so the scroll never jumps
-        if (pending) { const p = pending; pending = null; build(p); }
-      }
-      track.style.transform = `translate3d(${x.toFixed(2)}px,0,0)`;
-    } else if (pending) { const p = pending; pending = null; build(p); }
+    if (L.mode !== 'flip') {
+      if (seqW > 0) {
+        x -= (L.speed || 110) * dt;
+        if (-x >= seqW) {
+          x += seqW;
+          // swap in new content only at a loop boundary so the scroll never jumps
+          if (pending) { pending = null; crawlBuild(); }
+        }
+        track.style.transform = `translate3d(${x.toFixed(2)}px,0,0)`;
+      } else if (pending) { pending = null; crawlBuild(); }
+    }
     requestAnimationFrame(frame);
+  }
+
+  // ------------------------------------------------------------ one-at-a-time engine
+  let flipTimer = null, flipId = null;
+  // rotation state: regular headlines and breaking ones are cycled separately
+  let lastRegular = null, lastRegularPos = -1, lastBreaking = null, sinceBreaking = 0;
+  const shownBreaking = new Set(); // breaking items that have been on screen at least once
+
+  function nextAfter(list, id, pos) {
+    const i = list.findIndex((x) => x.id === id);
+    return list[(i >= 0 ? i + 1 : pos + 1) % list.length];
+  }
+
+  // A breaking item nobody has seen yet goes up immediately; after that breaking
+  // items come back after every `breakingEvery` regular headlines (0 = just take turns).
+  function pickNext(d) {
+    const every = L.breakingEvery ?? 2;
+    const brk = d.items.filter((x) => x.breaking);
+    const reg = every > 0 ? d.items.filter((x) => !x.breaking) : d.items;
+    const fresh = brk.find((x) => !shownBreaking.has(x.id));
+    if (fresh) return fresh;
+    if (!reg.length) return nextAfter(brk, lastBreaking, -1);
+    if (every > 0 && brk.length && sinceBreaking >= every) return nextAfter(brk, lastBreaking, -1);
+    return nextAfter(reg, lastRegular, lastRegularPos);
+  }
+
+  function noteShown(d, it) {
+    if (it.breaking) { shownBreaking.add(it.id); lastBreaking = it.id; sinceBreaking = 0; }
+    if (!it.breaking || !((L.breakingEvery ?? 2) > 0)) {
+      lastRegular = it.id;
+      lastRegularPos = d.items.filter((x) => (L.breakingEvery ?? 2) > 0 ? !x.breaking : true).findIndex((x) => x.id === it.id);
+      if (!it.breaking) sinceBreaking++;
+    }
+  }
+
+  // a breaking item that hasn't been shown yet should interrupt the rotation
+  const freshBreaking = (d) => d && d.items.some((x) => x.breaking && !shownBreaking.has(x.id) && x.id !== flipId);
+
+  function flipShow(first) {
+    clearTimeout(flipTimer);
+    const l = L;
+    const d = shown();
+    if (!d || !d.items.length) {
+      flipEl.innerHTML = `<div class="slide">${idleHtml()}</div>`;
+      flipId = null;
+      currentItem = null;
+      updateLabel();
+      return; // restarted when data arrives
+    }
+    // first = (re)start: show the current headline again; otherwise pick the next one
+    const current = d.items.find((x) => x.id === flipId);
+    const it = first && current && !freshBreaking(d) ? current : pickNext(d);
+    const key = JSON.stringify([it.id, it.title, it.headline, it.breaking, it.sourceColor, it.category]);
+    const same = flipEl.children.length === 1 && flipEl.firstElementChild.dataset.key === key;
+    flipId = it.id;
+    noteShown(d, it);
+    currentItem = it;
+    updateLabel();
+
+    const t = l.transition || 'slide';
+    const dur = t === 'none' ? 0 : 0.5;
+    rootStyle.setProperty('--dur', dur + 's');
+    let el;
+    if (same) {
+      el = flipEl.firstElementChild; // single headline: keep it up, no animation
+    } else {
+      el = document.createElement('div');
+      el.className = `slide t-${t}${first ? '' : ' enter'}${multi() ? ' multi' : ''}`;
+      el.dataset.key = key;
+      el.innerHTML = `<span class="inner">${itemHtml(it, d)}</span>`;
+      for (const old of [...flipEl.children]) {
+        old.className = `slide t-${t} leave${old.classList.contains('multi') ? ' multi' : ''}`;
+        setTimeout(() => old.remove(), dur * 1000 + 50);
+      }
+      flipEl.append(el);
+      if (multi()) fitLines(el);
+      el.getBoundingClientRect(); // commit the start position
+      el.classList.remove('enter');
+    }
+
+    // headlines wider than the bar scroll through after a short pause
+    // (measured when the scroll starts, so late-loading web fonts are accounted for)
+    const inner = el.querySelector('.inner');
+    inner.style.transition = 'none';
+    inner.style.transform = 'translateX(0)';
+    const dwell = Math.max(1, l.flipSeconds || 6);
+    const pause = Math.min(dwell, dur + 1.5);
+    flipTimer = setTimeout(() => {
+      const overflow = inner.scrollWidth - (el.clientWidth - parseFloat(getComputedStyle(el).paddingLeft) * 2);
+      let wait = dwell - pause;
+      if (overflow > 0) {
+        const scroll = overflow / (l.speed || 110);
+        inner.style.transition = `transform ${scroll}s linear`;
+        inner.style.transform = `translateX(${-overflow}px)`;
+        wait = Math.max(wait, scroll + 1.5);
+      }
+      flipTimer = setTimeout(() => flipShow(false), wait * 1000);
+    }, pause * 1000);
+  }
+
+  // Multi-line: wrap within maxLines. With automatic "grow" height the bar resizes to the
+  // lines this headline needs; otherwise text that still doesn't fit shrinks (to 70 %) and then gets "…".
+  function fitLines(el) {
+    const inner = el.querySelector('.inner');
+    const sizePx = parseFloat(getComputedStyle(inner).fontSize);
+    const lh = sizePx * 1.15;
+    const maxL = Math.max(1, L.maxLines || 2);
+    // badges make a line a little taller than plain text, hence the tolerance
+    const slack = sizePx * 0.35;
+    const fits = (n, scale) => inner.scrollHeight <= n * lh * scale + slack;
+    let lines;
+    if (embed) {
+      lines = Math.max(1, Math.min(maxL, Math.floor((viewport.clientHeight - sizePx * 0.25) / lh)));
+    } else if (L.height > 0) {
+      // fixed bar height: as many lines as fit in it
+      lines = Math.max(1, Math.min(maxL, Math.floor((L.height - sizePx * 0.25) / lh)));
+    } else if (L.grow) {
+      lines = 1;
+      while (lines < maxL && !fits(lines, 1)) lines++;
+      rootStyle.setProperty('--lines', lines);
+    } else {
+      lines = maxL; // automatic height is already sized for maxLines (measured from the target, not mid-animation)
+    }
+    let scale = 1;
+    while (!fits(lines, scale) && scale > 0.71) {
+      scale -= 0.05;
+      inner.style.fontSize = scale + 'em';
+    }
+    if (!fits(lines, scale)) {
+      inner.classList.add('clamp');
+      inner.style.setProperty('--clamp', lines);
+    }
+  }
+
+  // ------------------------------------------------------------ engine switching
+  function restart() {
+    clearTimeout(flipTimer);
+    if (L.mode === 'flip') {
+      track.innerHTML = ''; seqW = 0; x = 0;
+      flipEl.innerHTML = '';
+      flipShow(true);
+    } else {
+      crawlBuild();
+    }
+  }
+
+  function onData(d, immediate) {
+    const prev = data;
+    data = d;
+    updateLabel();
+    if (L.mode === 'flip') {
+      // flip mode picks up changes at the next headline; start right away if idle
+      // forget items that are no longer breaking, so re-flagging one makes it cut in again
+      for (const id of [...shownBreaking]) if (!d.items.some((x) => x.id === id && x.breaking)) shownBreaking.delete(id);
+      if (!flipId) flipShow(true);
+      else if (freshBreaking(d)) flipShow(false); // breaking news cuts in straight away
+      return;
+    }
+    const wasEmpty = !prev || !prev.items.length;
+    const breakingArrived = d.items.some((i) => i.breaking) && !(prev && prev.items.some((i) => i.breaking));
+    if (immediate || wasEmpty || !d.items.length || breakingArrived) { pending = null; crawlBuild(); } else pending = true;
   }
 
   async function load() {
@@ -152,21 +461,20 @@
       const r = await fetch(`/out/${encodeURIComponent(out)}.json`, { cache: 'no-store' });
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
-      if (JSON.stringify(d.clock) !== JSON.stringify(clockSettings)) { clockSettings = d.clock || null; tick(); }
-      const s = JSON.stringify([d.items.map((i) => [i.id, i.headline, i.breaking, i.sourceColor]), d.separator, d.breakingLabel, d.sourceStyle]);
+      if (JSON.stringify(d.clock) !== JSON.stringify(serverClock)) { serverClock = d.clock || null; fmtKey = ''; tick(); }
+      if (JSON.stringify(d.look) !== JSON.stringify(serverLook)) { serverLook = d.look || {}; applyLook(); }
+      const s = JSON.stringify([d.items.map((i) => [i.id, i.headline, i.breaking, i.sourceColor, i.category]), d.separator, d.breakingLabel, d.sourceStyle, d.categoryStyle]);
       if (s === sig) return;
+      const first = !sig;
       sig = s;
-      // first load, or empty → show immediately; otherwise wait for the loop point
-      if (!data || !data.items.length || !d.items.length) build(d); else pending = d;
-      // breaking items arriving: switch right away
-      if (d.items.some((i) => i.breaking) && !data.items.some((i) => i.breaking)) { pending = null; build(d); }
+      onData(d, first);
     } catch { /* keep showing what we have */ }
   }
 
-  // Clock: output settings, overridable per page with clock=0|1|12|24, tz=, clocklabel=, seconds=0|1
+  // ------------------------------------------------------------ clock
   let fmtKey = '', fmt = null;
   function clockConfig() {
-    const c = clockSettings || {};
+    const c = { ...(serverClock || {}), ...(previewClock || {}) };
     const p = q.get('clock');
     return {
       show: p === '0' ? false : p ? true : c.show !== false,
@@ -183,10 +491,7 @@
     const key = JSON.stringify(c);
     if (key !== fmtKey) {
       fmtKey = key;
-      const opts = {
-        hour: c.format === '12h' ? 'numeric' : '2-digit', minute: '2-digit', second: c.seconds ? '2-digit' : undefined,
-        hourCycle: c.format === '12h' ? 'h12' : 'h23',
-      };
+      const opts = { hour: c.format === '12h' ? 'numeric' : '2-digit', minute: '2-digit', second: c.seconds ? '2-digit' : undefined, hourCycle: c.format === '12h' ? 'h12' : 'h23' };
       try { fmt = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: c.tz || undefined }); }
       catch { fmt = new Intl.DateTimeFormat('en-US', opts); } // unknown zone: fall back to local time
     }
@@ -196,15 +501,26 @@
     clockEl.innerHTML = `${c.label ? `<span class="clabel">${esc(c.label)}</span>` : ''}${time}`;
   }
 
+  // ------------------------------------------------------------ designer live preview (same-origin only)
+  addEventListener('message', (e) => {
+    if (e.origin !== location.origin || !e.data || e.data.type !== 'louiseticker-preview') return;
+    previewLook = e.data.look || null;
+    previewClock = e.data.clock || null;
+    previewSettings = e.data.settings || null;
+    fmtKey = '';
+    applyLook();
+  });
+
+  applyLook();
   load();
   setInterval(load, 15000);
-  tick(); setInterval(tick, 1000);
+  setInterval(tick, 1000);
   try {
     const es = new EventSource('/api/events');
     es.addEventListener('output', (e) => { const d = JSON.parse(e.data || '{}'); if (d.id === out) load(); });
-    es.addEventListener('feed', () => {});
   } catch {}
-  addEventListener('resize', () => data && build(data));
+  addEventListener('resize', () => restart());
+  document.fonts && document.fonts.ready.then(() => restart());
   requestAnimationFrame(frame);
 })();
 </script>

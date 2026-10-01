@@ -6,7 +6,7 @@ const prefs = (() => {
   const KEY = 'louiseticker.prefs';
   let p = {};
   try { p = JSON.parse(localStorage.getItem(KEY)) || {}; } catch {}
-  const d = { panes: [{ tab: 'all' }], focused: 0, closedTabs: [], lastSeen: {}, output: 'main', compact: false, showImages: true };
+  const d = { panes: [{ tab: 'all' }], focused: 0, closedTabs: [], lastSeen: {}, output: 'main', compact: false, showImages: true, askCategory: true };
   p = { ...d, ...p };
   p.save = () => { try { const { save, ...rest } = p; localStorage.setItem(KEY, JSON.stringify(rest)); } catch {} };
   return p;
@@ -19,6 +19,10 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const feedById = (id) => st.feeds.find((f) => f.id === id);
+const categoryById = (id) => (id && (st.categories || []).find((c) => c.id === id)) || null;
+const catChip = (c, attrs = '') => `<span class="tag cat" style="background:${esc(c.color)}" ${attrs}>${esc(c.name.toUpperCase())}</span>`;
+const categoryOptions = (selected, none = 'No category') =>
+  `<option value="">${none}</option>` + (st.categories || []).map((c) => `<option value="${esc(c.id)}" ${c.id === selected ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
 const currentOutput = () => st.outputs.find((o) => o.id === prefs.output) || st.outputs[0];
 
 function timeAgo(t) {
@@ -259,7 +263,8 @@ function renderList(i) {
         <div class="meta">${p.tab === 'all' ? `<span class="src" style="color:${esc(f.color)}">${esc(f.shortName || f.title)}</span>·` : ''}
           <time title="${esc(it.date || '')}">${timeAgo(it.date || it.firstSeen)}</time>
           ${isNew ? '<span class="new">NEW</span>' : ''}${picked ? `<span class="inout">● in ${esc(o.name)}${sel.get(it.id).breaking ? ' · BREAKING' : ''}</span>` : ''}
-          ${it.author ? `<span>· ${esc(it.author)}</span>` : ''}</div>
+          ${it.author ? `<span>· ${esc(it.author)}</span>` : ''}
+          ${(() => { const c = categoryById(suggestCategory(it, f)); return c ? catChip(c, `title="Ticker category${(it.categories || []).length ? ` · RSS tags: ${esc(it.categories.join(', '))}` : ''}"`) : ''; })()}</div>
         <h3>${hl(it.title)}</h3>
         ${it.description ? `<p>${hl(it.description)}</p>` : ''}
       </div>
@@ -348,11 +353,17 @@ function wirePane(i) {
     const existing = o.entries.find((x) => x.itemId === item);
     if (act && act.dataset.act === 'breaking') {
       if (existing) await api('PATCH', `/api/outputs/${o.id}/entries/${existing.id}`, { breaking: !existing.breaking });
-      else await api('POST', `/api/outputs/${o.id}/entries`, { feedId: feed, itemId: item, breaking: true, top: true });
+      else {
+        const cat = await askCategory(e, { feedId: feed, itemId: item, breaking: true });
+        if (cat === undefined) return;
+        await api('POST', `/api/outputs/${o.id}/entries`, { feedId: feed, itemId: item, breaking: true, top: true, ...cat });
+      }
     } else if (existing) {
       await api('DELETE', `/api/outputs/${o.id}/entries/${existing.id}`);
     } else {
-      await api('POST', `/api/outputs/${o.id}/entries`, { feedId: feed, itemId: item });
+      const cat = await askCategory(e, { feedId: feed, itemId: item });
+      if (cat === undefined) return;
+      await api('POST', `/api/outputs/${o.id}/entries`, { feedId: feed, itemId: item, ...cat });
     }
     await loadState();
     renderAll();
@@ -376,7 +387,10 @@ const paneAction = safe(async (i, act) => {
     const items = paneStories(p).slice(0, p.limit || 150).filter((it) => !sel.has(it.id)).map((it) => ({ feedId: it.feedId, itemId: it.id }));
     if (!items.length) return toast('Nothing new to add');
     if (items.length > 10 && !confirm(`Add ${items.length} stories to "${currentOutput().name}"?`)) return;
-    await api('POST', `/api/outputs/${currentOutput().id}/entries`, { items });
+    const btn = paneEls[i].toolbar.querySelector('[data-act="pickall"]').getBoundingClientRect();
+    const cat = await askCategory({ clientX: btn.left, clientY: btn.bottom }, { count: items.length });
+    if (cat === undefined) return;
+    await api('POST', `/api/outputs/${currentOutput().id}/entries`, { items: items.map((x) => ({ ...x, ...cat })) });
     await loadState();
     renderAll();
     toast(`Added ${items.length} stories`);
@@ -387,6 +401,8 @@ const paneAction = safe(async (i, act) => {
 function renderOutput() {
   const o = currentOutput();
   $('#outputSelect').innerHTML = st.outputs.map((x) => `<option value="${x.id}" ${x.id === o.id ? 'selected' : ''}>${esc(x.name)} (${x.entries.length})</option>`).join('');
+  const cs = $('#customCategory');
+  if (document.activeElement !== cs) cs.innerHTML = categoryOptions(cs.value, 'Category…');
   const base = location.origin;
   const links = [['RSS', `/out/${o.id}.rss`], ['JSON', `/out/${o.id}.json`], ['TXT', `/out/${o.id}.txt`], ['Ticker ▶', `/ticker?out=${o.id}`]];
   $('#endpoints').innerHTML = links.map(([l, u]) => `<span class="endpoint"><a href="${u}" target="_blank" rel="noopener" title="${base}${u}">${l}</a><button data-copy="${base}${u}" title="Copy URL">⧉</button></span>`).join('')
@@ -417,6 +433,7 @@ function renderOutput() {
           <div class="hl" title="Double-click to edit">${esc(e.title)}</div>
           <div class="emeta">
             ${e.breaking ? '<span class="tag brk">BREAKING</span>' : ''}${e.hold ? '<span class="tag">HELD</span>' : ''}${e.auto ? '<span class="tag auto" title="Added by a keyword rule">AUTO</span>' : ''}${e.custom ? '<span class="tag">CUSTOM</span>' : ''}${edited ? '<span class="tag edit" title="Original: ' + esc(e.originalTitle) + '">EDITED</span>' : ''}
+            ${categoryById(e.category) ? catChip(categoryById(e.category), 'data-act="category" title="Change category" role="button"') : '<span class="tag cat-none" data-act="category" title="Set a category" role="button">+ CATEGORY</span>'}
             <span style="color:${esc(f ? f.color : 'var(--muted)')}">${esc(src)}</span>
             <span>· added ${timeAgo(e.addedAt)}</span>
             ${e.expiresAt ? `<span>· ⏱ ${timeLeft(e.expiresAt)}</span>` : ''}
@@ -451,6 +468,7 @@ function wireOutput() {
     toast(`Created output "${o.name}"`);
   }));
   $('#btnOutputSettings').addEventListener('click', () => openOutputSettings());
+  $('#btnDesigner').addEventListener('click', () => openDesigner());
   $('#endpoints').addEventListener('click', (e) => {
     const b = e.target.closest('[data-copy]');
     if (!b) return;
@@ -461,7 +479,7 @@ function wireOutput() {
     const title = $('#customText').value.trim();
     if (!title) return;
     const breaking = $('#customBreaking').checked;
-    await api('POST', `/api/outputs/${currentOutput().id}/entries`, { title, breaking, top: breaking });
+    await api('POST', `/api/outputs/${currentOutput().id}/entries`, { title, breaking, top: breaking, category: $('#customCategory').value });
     $('#customText').value = '';
     $('#customBreaking').checked = false;
     await loadState();
@@ -490,6 +508,7 @@ function wireOutput() {
       case 'reset': await api('PATCH', url, { resetTitle: true }); break;
       case 'remove': await api('DELETE', url); break;
       case 'expiry': return openExpiry(o, entry);
+      case 'category': return openCategoryPicker(o, entry);
       case 'edit': return editHeadline(li, o, entry);
     }
     await loadState();
@@ -535,7 +554,14 @@ function wireOutput() {
       const s = JSON.parse(story);
       const existing = o.entries.find((x) => x.itemId === s.itemId);
       if (existing) moving = existing.id;
-      else { const [added] = await api('POST', `/api/outputs/${o.id}/entries`, s); if (!added) return; moving = added.id; await loadState(); }
+      else {
+        const cat = await askCategory(e, s);
+        if (cat === undefined) { renderAll(); return; }
+        const [added] = await api('POST', `/api/outputs/${o.id}/entries`, { ...s, ...cat });
+        if (!added) return;
+        moving = added.id;
+        await loadState();
+      }
     }
     if (!moving || moving === beforeId) { renderAll(); return; }
     const ids = currentOutput().entries.map((x) => x.id).filter((x) => x !== moving);
@@ -573,9 +599,71 @@ function editHeadline(li, o, entry) {
   hl.addEventListener('blur', () => finish(true), { once: true });
 }
 
+// ------------------------------------------------------------ category picker (when adding)
+// The category a story would get on its own: its feed's category, plus guessing if switched on.
+function suggestCategory(it, f) {
+  if (st.settings.autoCategorize === false) return f && categoryById(f.category) ? f.category : null;
+  return categorize(it, f, st.categories);
+}
+
+/**
+ * Ask which category to file a story under, in a small pop-up next to the click.
+ * Resolves with the fields to send: {category} (id or "" for none), {} to leave it to the
+ * automatic category (picker switched off, or "keep suggestions" when adding many), or
+ * undefined when cancelled. Keys: 1–9 pick, 0 = none, Enter = highlighted, Esc = cancel.
+ */
+function askCategory(ev, { feedId, itemId, count = 1, breaking = false } = {}) {
+  if (!prefs.askCategory || !(st.categories || []).length) return Promise.resolve({});
+  const f = feedById(feedId);
+  const it = f && (st.items[feedId] || []).find((x) => x.id === itemId);
+  const suggested = it ? suggestCategory(it, f) : null;
+  const cats = st.categories;
+  document.querySelector('.catpop')?.dispatchEvent(new Event('cancel'));
+
+  return new Promise((resolve) => {
+    const pop = document.createElement('div');
+    pop.className = 'catpop';
+    pop.innerHTML = `<div class="catpop-head">${breaking ? '<span class="tag brk">BREAKING</span> ' : ''}${count > 1 ? `Add ${count} stories as…` : `Add to <b>${esc(currentOutput().name)}</b> as…`}</div>
+      <div class="catpop-list">${cats.map((c, i) => `<button type="button" data-cat="${esc(c.id)}" class="${c.id === suggested ? 'sel' : ''}" style="--c:${esc(c.color)}">
+          ${i < 9 ? `<kbd>${i + 1}</kbd>` : '<kbd></kbd>'}<i></i>${esc(c.name)}${c.id === suggested ? '<small>suggested</small>' : ''}</button>`).join('')}
+        <button type="button" data-cat="" class="${!suggested && count === 1 ? 'sel' : ''}" style="--c:#5f6778"><kbd>0</kbd><i></i>No category</button>
+        ${count > 1 ? '<button type="button" data-keep class="sel" style="--c:#3b6fd6"><kbd>↵</kbd><i></i>Each story’s own suggestion</button>' : ''}
+      </div>
+      <div class="catpop-foot">1–9 pick · 0 none · Enter ${count > 1 ? 'suggestions' : 'highlighted'} · Esc cancel</div>`;
+    document.body.append(pop);
+    // place next to the pointer, kept on screen
+    const r = pop.getBoundingClientRect();
+    const x = Math.min(Math.max(8, (ev.clientX ?? innerWidth / 2) + 8), innerWidth - r.width - 8);
+    const y = Math.min(Math.max(8, (ev.clientY ?? innerHeight / 2) - 20), innerHeight - r.height - 8);
+    pop.style.left = x + 'px';
+    pop.style.top = y + 'px';
+
+    const done = (val) => {
+      pop.remove();
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('mousedown', onOutside, true);
+      resolve(val);
+    };
+    const choose = (btn) => done(btn.hasAttribute('data-keep') ? {} : { category: btn.dataset.cat });
+    const onKey = (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); done(undefined); }
+      else if (e.key === 'Enter') { e.preventDefault(); choose(pop.querySelector('button.sel') || pop.querySelector('[data-cat=""]')); }
+      else if (e.key === '0') choose(pop.querySelector('[data-cat=""]'));
+      else if (/^[1-9]$/.test(e.key) && cats[+e.key - 1]) choose(pop.querySelectorAll('[data-cat]')[+e.key - 1]);
+    };
+    const onOutside = (e) => { if (!pop.contains(e.target)) done(undefined); };
+    pop.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) choose(b); });
+    pop.addEventListener('cancel', () => done(undefined));
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => document.addEventListener('mousedown', onOutside, true));
+  });
+}
+
 // ------------------------------------------------------------ modals
-function modal(html, mount) {
+function modal(html, mount, { wide = false } = {}) {
   const dlg = $('#modal');
+  dlg.classList.toggle('wide', wide);
   $('#modalBody').innerHTML = html;
   if (!dlg.open) dlg.showModal();
   $$('[data-close-modal]', dlg).forEach((b) => b.addEventListener('click', () => dlg.close()));
@@ -687,6 +775,8 @@ function openFeedSettings(id) {
         <label class="field"><span>Colour</span><input name="color" type="color" value="${esc(f.color)}" style="width:100%;height:36px;background:none;border:0"></label>
       </div>
       <label class="field"><span>Feed URL</span><input name="url" value="${esc(f.url)}"></label>
+      <label class="field"><span>Ticker category for this feed's stories</span><select name="category">${categoryOptions(f.category, 'Automatic (from each story’s RSS tags and link)')}</select>
+        <small>Pick one for single-topic feeds, e.g. “Sport” for a sport feed. <a href="#" id="editCats">Edit categories…</a></small></label>
       <label class="check"><input type="checkbox" name="enabled" ${f.enabled ? 'checked' : ''}> Auto-refresh this feed</label>
       <div class="hint">${f.itemCount} stories stored · last update ${f.lastFetched ? timeAgo(f.lastFetched) : 'never'}${f.lastError ? ` · <span style="color:var(--warn)">⚠ ${esc(f.lastError)}</span>` : ''}</div>
     </div>
@@ -694,6 +784,7 @@ function openFeedSettings(id) {
       <div class="right"><button type="button" class="btn" data-close-modal>Cancel</button><button class="btn primary">Save</button></div></div></form>`,
   (dlg) => {
     const form = $('#feedForm', dlg);
+    $('#editCats', dlg).addEventListener('click', (e) => { e.preventDefault(); openCategories(); });
     form.addEventListener('submit', safe(async (e) => {
       e.preventDefault();
       const d = Object.fromEntries(new FormData(form));
@@ -726,6 +817,11 @@ function openSettings() {
       <div class="section-title">Subscriptions (${st.feeds.length})</div>
       <div class="feedlist" id="feedRows">${rows()}</div>
       <div style="display:flex;gap:8px;margin-top:10px"><button type="button" class="btn small" id="setAdd">＋ Add feed</button><a class="btn small" href="/api/opml" download>Export OPML</a></div>
+      <div class="section-title">Ticker categories (${(st.categories || []).length})</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">${(st.categories || []).map((c) => catChip(c)).join('')}
+        <button type="button" class="btn small" id="setCats">Edit categories…</button></div>
+      <label class="check" style="margin-top:12px"><input type="checkbox" name="askCategory" ${prefs.askCategory ? 'checked' : ''}> Ask for a category each time I add a story <span class="hint">— pop-up with number keys 1–9</span></label>
+      <label class="check"><input type="checkbox" name="autoCategorize" ${s.autoCategorize !== false ? 'checked' : ''}> Guess categories from RSS tags and links <span class="hint">— when off, only feed categories and your choices are used</span></label>
       <div class="section-title">Keyboard</div>
       <div class="hint"><span class="kbd">/</span> search · <span class="kbd">R</span> refresh all · <span class="kbd">A</span> add feed · <span class="kbd">1</span>–<span class="kbd">9</span> switch tab · <span class="kbd">[</span> <span class="kbd">]</span> previous / next tab · <span class="kbd">S</span> split pane</div>
       <div class="section-title">For the ticker system</div>
@@ -738,10 +834,12 @@ function openSettings() {
       e.preventDefault();
       prefs.showImages = form.showImages.checked;
       prefs.compact = form.compact.checked;
-      await api('PATCH', '/api/settings', { refreshMinutes: form.refreshMinutes.value, maxItemsPerFeed: form.maxItemsPerFeed.value });
+      prefs.askCategory = form.askCategory.checked;
+      await api('PATCH', '/api/settings', { refreshMinutes: form.refreshMinutes.value, maxItemsPerFeed: form.maxItemsPerFeed.value, autoCategorize: form.autoCategorize.checked });
       closeModal(); await loadState(); renderAll(); toast('Settings saved');
     }));
     $('#setAdd', dlg).addEventListener('click', openAddFeed);
+    $('#setCats', dlg).addEventListener('click', () => openCategories());
     $('#feedRows', dlg).addEventListener('click', (e) => {
       const show = e.target.closest('[data-show]');
       const edit = e.target.closest('[data-edit]');
@@ -749,11 +847,6 @@ function openSettings() {
       if (edit) openFeedSettings(edit.dataset.edit);
     });
   });
-}
-
-function formatClock(date, format, tz, seconds) {
-  const opts = { hour: format === '12h' ? 'numeric' : '2-digit', minute: '2-digit', second: seconds ? '2-digit' : undefined, hourCycle: format === '12h' ? 'h12' : 'h23' };
-  try { return date.toLocaleTimeString('en-US', { ...opts, timeZone: tz || undefined }); } catch { return date.toLocaleTimeString('en-US', opts); }
 }
 
 let tzCache = null;
@@ -796,27 +889,11 @@ function openOutputSettings() {
         <label class="field"><span>Breaking label</span><input name="breakingLabel" value="${esc(s.breakingLabel)}"><small>Prefixed to breaking headlines</small></label>
         <label class="field"><span>Separator (text output &amp; ticker page)</span><input name="separator" value="${esc(s.separator)}"></label>
       </div>
-      <label class="field"><span>Show the source</span>
-        <select name="sourceStyle">${[['none', 'Don’t show the source'], ['badge', 'Coloured badge before the headline'], ['prefix', 'Text before the headline: “BBC: …”'], ['suffix', 'Text after the headline: “… (BBC)”']]
-          .map(([v, l]) => `<option value="${v}" ${s.sourceStyle === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
-        <small>Uses each feed’s ticker label (editable in feed settings) and colour. RSS/TXT outputs can’t show colour, so the badge becomes “BBC: …” there.</small></label>
       ${cb('uppercase', 'ALL CAPS headlines')}
       ${cb('breakingFirst', 'Breaking items always go first')}
       ${cb('newestFirst', 'Sort by publication time (newest first) instead of manual order')}
       ${cb('includeDescription', 'Include story summaries in the RSS/JSON output')}
-      <div class="section-title">Clock (ticker page)</div>
-      ${cb('showClock', 'Show a clock on the ticker')}
-      <div class="row2">
-        <label class="field"><span>Format</span>
-          <select name="clockFormat">${[['24h', '24-hour (17:05)'], ['12h', '12-hour (5:05 PM)']].map(([v, l]) => `<option value="${v}" ${s.clockFormat === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-        <label class="field"><span>Time zone</span>
-          <select name="clockTimezone">${timeZoneOptions(s.clockTimezone)}</select></label>
-      </div>
-      <div class="row2">
-        <label class="field"><span>Clock label (optional)</span><input name="clockLabel" value="${esc(s.clockLabel)}" maxlength="20" placeholder="e.g. PARIS"><small>Shown before the time</small></label>
-        <div class="field"><span>Preview</span><div id="clockPreview" style="font-size:22px;font-weight:700;padding-top:2px"></div></div>
-      </div>
-      ${cb('clockSeconds', 'Show seconds')}
+      <p class="hint">Ticker appearance, layout, display mode, source &amp; category labels and the clock are in the 🎨 Ticker designer.</p>
       <div class="section-title">Automatic rules</div>
       <label class="field"><span>Auto-add keywords</span><textarea name="include" placeholder="one per line or comma separated — e.g. earthquake, election, Paris">${esc(r.include.join('\n'))}</textarea>
         <small>New stories (last 12h) whose headline or summary contain one of these are added automatically. Use * as wildcard (elect* ). Matches are highlighted in the story lists.</small></label>
@@ -829,24 +906,13 @@ function openOutputSettings() {
       <div class="right"><button type="button" class="btn" data-close-modal>Cancel</button><button class="btn primary">Save</button></div></div></form>`,
   (dlg) => {
     const form = $('#outForm', dlg);
-    const preview = () => {
-      const el = $('#clockPreview', dlg);
-      if (!el) return clearInterval(timer);
-      const tz = form.clockTimezone.value;
-      const time = formatClock(new Date(), form.clockFormat.value, tz, form.clockSeconds.checked);
-      el.textContent = form.showClock.checked ? `${form.clockLabel.value.trim().toUpperCase()} ${time}`.trim() : '(clock hidden)';
-    };
-    const timer = setInterval(preview, 1000);
-    dlg.addEventListener('close', () => clearInterval(timer), { once: true });
-    form.addEventListener('input', preview);
-    form.addEventListener('change', preview);
-    preview();
     form.addEventListener('submit', safe(async (e) => {
       e.preventDefault();
       const fd = new FormData(form);
       const settings = {};
       for (const k of Object.keys(st.defaults)) {
-        if (typeof st.defaults[k] === 'boolean') settings[k] = form[k].checked;
+        if (!form.elements[k]) continue; // edited elsewhere (e.g. clock → designer)
+        if (typeof st.defaults[k] === 'boolean') settings[k] = form.elements[k].checked;
         else if (fd.has(k)) settings[k] = fd.get(k);
       }
       await api('PATCH', `/api/outputs/${o.id}`, {
@@ -860,6 +926,294 @@ function openOutputSettings() {
       await api('DELETE', `/api/outputs/${o.id}`);
       closeModal(); await loadState(); prefs.output = st.outputs[0].id; renderAll();
     }));
+  });
+}
+
+// ------------------------------------------------------------ ticker designer
+const FONTS = [
+  'Segoe UI', 'Arial', 'Arial Black', 'Bahnschrift', 'Calibri', 'Franklin Gothic Medium', 'Georgia', 'Impact', 'Tahoma', 'Trebuchet MS', 'Verdana',
+  // Google fonts (loaded by the ticker page; need an internet connection)
+  'Roboto Condensed', 'Barlow Condensed', 'Oswald', 'Roboto', 'Inter', 'Montserrat', 'Open Sans', 'Source Sans 3',
+];
+
+const THEMES = [
+  ['Classic red', '#e5383b', {}],
+  ['Midnight', '#ffb703', { bg: '#0d1b2a', fg: '#ffffff', accent: '#ffb703', labelBg: '#1b4965', labelFg: '#ffffff', clockBg: '#13293d', clockFg: '#ffffff' }],
+  ['Daylight', '#d00000', { bg: '#f4f4f4', fg: '#111111', accent: '#d00000', labelBg: '#d00000', labelFg: '#ffffff', clockBg: '#dedede', clockFg: '#111111' }],
+  ['Sport', '#1e8f4e', { bg: '#0f1a14', fg: '#ffffff', accent: '#1e8f4e', labelBg: '#1e8f4e', labelFg: '#ffffff', clockBg: '#163322', clockFg: '#ffffff' }],
+  ['Royal', '#7b2cbf', { bg: '#10002b', fg: '#ffffff', accent: '#c77dff', labelBg: '#7b2cbf', labelFg: '#ffffff', clockBg: '#240046', clockFg: '#ffffff' }],
+  ['Floating', '#3b6fd6', { margin: 40, radius: 12, bgOpacity: 88, shadow: true }],
+  ['Full width', '#8d95a5', { margin: 0, radius: 0, bgOpacity: 100 }],
+];
+
+function openDesigner() {
+  const o = currentOutput();
+  const L = { ...st.lookDefaults, ...o.look };
+  const s = o.settings;
+  const base = (st.server.lanUrls && st.server.lanUrls[0]) || location.origin;
+  const sourceUrl = `${base}/ticker?out=${o.id}`;
+
+  const rng = (name, label, min, max, step, unit = '', autoAt = null, autoText = 'auto') => `
+    <label class="field"><span>${label}</span><div class="range">
+      <input type="range" name="${name}" min="${min}" max="${max}" step="${step}" value="${L[name]}" data-unit="${unit}" ${autoAt != null ? `data-auto="${autoAt}" data-autotext="${autoText}"` : ''}>
+      <output></output></div></label>`;
+  const color = (name, label) => `<label class="color"><input type="color" name="${name}" value="${esc(L[name] || '#000000')}"> ${label}</label>`;
+  const chk = (name, label, on) => `<label class="check"><input type="checkbox" name="${name}" ${on ? 'checked' : ''}> ${label}</label>`;
+  const seg = (name, opts, val) => `<div class="seg">${opts.map(([v, l]) => `<label><input type="radio" name="${name}" value="${v}" ${val === v ? 'checked' : ''}>${l}</label>`).join('')}</div>`;
+
+  modal(`${head(`Ticker designer · ${esc(o.name)}`)}
+    <form id="designForm" autocomplete="off"><div class="dlg-body" style="padding:16px 18px"><div class="designer">
+      <div>
+        <div class="stage-wrap" id="stageWrap"><iframe id="stageFrame" title="Ticker preview" src="/ticker?out=${encodeURIComponent(o.id)}&stage=1"></iframe></div>
+        <div class="stage-note"><span>Live preview at 1920×1080. Sample headlines appear when nothing is on air. Nothing changes on air until you save.</span></div>
+        <div class="themes">${THEMES.map(([n, c], i) => `<button type="button" class="theme" data-theme="${i}"><i style="background:${c}"></i><span>${n}</span></button>`).join('')}</div>
+        <div class="field" style="margin-top:16px"><span>Browser-source URL (OBS / vMix / CasparCG: set the source to 1920×1080)</span>
+          <div style="display:flex;gap:6px"><input readonly value="${esc(sourceUrl)}" id="srcUrl" style="flex:1"><button type="button" class="btn small" id="copySrc">Copy</button><a class="btn small" href="${esc(sourceUrl)}" target="_blank" rel="noopener">Open ↗</a></div></div>
+      </div>
+      <div class="dpanel">
+        <details open><summary>Display</summary><div class="inner">
+          <div class="field">${seg('mode', [['crawl', '⟵ Continuous crawl'], ['flip', '▤ One at a time']], L.mode)}</div>
+          ${rng('speed', 'Scroll speed', 20, 400, 5, ' px/s')}
+          <div data-when="mode=flip">
+            ${rng('flipSeconds', 'Time per headline', 2, 30, 0.5, ' s')}
+            ${rng('breakingEvery', 'Repeat breaking news after every', 0, 10, 1, ' stories', 0, 'in turn')}
+            <p class="hint" style="margin:-6px 0 12px">New breaking news always cuts in immediately. While it’s up, the label switches to the breaking label.</p>
+            <label class="field"><span>Transition</span><select name="transition">${[['slide', 'Slide up'], ['push', 'Push from the right'], ['fade', 'Fade'], ['none', 'Cut (no animation)']].map(([v, l]) => `<option value="${v}" ${L.transition === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+              <small>Single-line headlines too long for the bar scroll through before the next one.</small></label>
+            ${chk('multiline', 'Allow headlines on several lines', L.multiline)}
+            <div data-when="multiline">
+              ${rng('maxLines', 'Maximum lines', 2, 4, 1, ' lines')}
+              <div class="field" data-when="height=0"><span>Bar height</span>${seg('grow', [['0', 'Fits the maximum lines'], ['1', 'Grows with each headline']], L.grow ? '1' : '0')}
+                <small>With a fixed bar height (Layout), text that doesn’t fit shrinks slightly, then ends with “…”.</small></div>
+            </div>
+          </div>
+          <p class="hint" data-when="mode=crawl" style="margin:4px 0 8px">Multi-line headlines and the category label block are available in “One at a time” mode.</p>
+        </div></details>
+
+        <details open><summary>Labels</summary><div class="inner">
+          <label class="field"><span>Category</span><select name="categoryStyle">${[['badge', 'Coloured badge before the headline'], ['text', 'Coloured word before the headline'], ['label', 'In the label block (one at a time) — e.g. “SPORT”'], ['none', 'Don’t show']]
+            .map(([v, l]) => `<option value="${v}" ${s.categoryStyle === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+            <small>${(st.categories || []).length} categories · <a href="#" id="dEditCats">Edit categories…</a></small></label>
+          <label class="field"><span>Source</span><select name="sourceStyle">${[['badge', 'Coloured badge before the headline'], ['prefix', 'Text before: “BBC: …”'], ['suffix', 'Text after: “… (BBC)”'], ['none', 'Don’t show']]
+            .map(([v, l]) => `<option value="${v}" ${s.sourceStyle === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+            <small>Uses each feed’s ticker label and colour. In the RSS/TXT outputs badges become text (“Sport | BBC: …”).</small></label>
+        </div></details>
+
+        <details open><summary>Layout</summary><div class="inner">
+          <div class="field"><span>Position on screen</span>${seg('position', [['bottom', 'Bottom'], ['top', 'Top']], L.position)}</div>
+          ${rng('height', 'Bar height', 0, 240, 2, ' px', 0)}
+          ${rng('margin', 'Distance from screen edges', 0, 200, 2, ' px')}
+          ${rng('radius', 'Rounded corners', 0, 60, 1, ' px')}
+          ${chk('showLabel', 'Show label block', L.showLabel)}
+          <label class="field" data-when="showLabel"><span>Label text</span><input name="labelText" value="${esc(L.labelText)}" maxlength="30"><small>Switches to the breaking label while breaking news is on air.</small></label>
+          <label class="field"><span>Logo image URL (optional)</span><input name="logoUrl" value="${esc(L.logoUrl)}" placeholder="https://…/logo.png"></label>
+          ${chk('shadow', 'Drop shadow', L.shadow)}
+        </div></details>
+
+        <details open><summary>Text</summary><div class="inner">
+          <label class="field"><span>Font</span><input name="fontFamily" list="fontList" value="${esc(L.fontFamily)}">
+            <datalist id="fontList">${FONTS.map((f) => `<option value="${esc(f)}">`).join('')}</datalist>
+            <small>Pick from the list or type any font installed on the ticker computer.</small></label>
+          ${rng('fontSize', 'Text size', 12, 96, 1, ' px')}
+          <label class="field"><span>Weight</span><select name="fontWeight">${[[400, 'Regular'], [600, 'Semi-bold'], [700, 'Bold'], [800, 'Extra-bold']].map(([v, l]) => `<option value="${v}" ${+L.fontWeight === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        </div></details>
+
+        <details open><summary>Colours</summary><div class="inner">
+          <div class="colors">
+            ${color('bg', 'Bar background')}${color('fg', 'Headline text')}
+            ${color('labelBg', 'Label background')}${color('labelFg', 'Label text')}
+            ${color('clockBg', 'Clock background')}${color('clockFg', 'Clock text')}
+            ${color('accent', 'Separators &amp; breaking')}
+            <label class="color" data-when="!badgeFeed"><input type="color" name="badgeColor" value="${esc(L.badgeColor || '#555555')}"> Source badges</label>
+          </div>
+          ${chk('badgeFeed', 'Source badges use each feed’s own colour', !L.badgeColor)}
+          ${rng('bgOpacity', 'Bar opacity', 0, 100, 1, ' %')}
+          ${chk('breakingPulse', 'Pulse the label during breaking news', L.breakingPulse)}
+        </div></details>
+
+        <details><summary>Clock</summary><div class="inner">
+          ${chk('showClock', 'Show a clock', s.showClock)}
+          <div data-when="showClock">
+            <div class="field"><span>Format</span>${seg('clockFormat', [['24h', '24-hour · 17:05'], ['12h', '12-hour · 5:05 PM']], s.clockFormat)}</div>
+            <label class="field"><span>Time zone</span><select name="clockTimezone">${timeZoneOptions(s.clockTimezone)}</select></label>
+            <label class="field"><span>Clock label (optional)</span><input name="clockLabel" value="${esc(s.clockLabel)}" maxlength="20" placeholder="e.g. PARIS"></label>
+            ${chk('clockSeconds', 'Show seconds', s.clockSeconds)}
+          </div>
+        </div></details>
+      </div>
+    </div></div>
+    <div class="dlg-foot"><button type="button" class="btn" id="resetLook">Reset to default</button>
+      <div class="right"><button type="button" class="btn" data-close-modal>Cancel</button><button class="btn primary">Save &amp; go live</button></div></div></form>`,
+  (dlg) => {
+    const form = $('#designForm', dlg);
+    const frame = $('#stageFrame', dlg);
+    const wrap = $('#stageWrap', dlg);
+    const F = form.elements;
+
+    const fit = () => { frame.style.transform = `scale(${wrap.clientWidth / 1920})`; };
+    const ro = new ResizeObserver(fit);
+    ro.observe(wrap);
+    dlg.addEventListener('close', () => ro.disconnect(), { once: true });
+
+    const gather = () => {
+      const look = {};
+      for (const [k, def] of Object.entries(st.lookDefaults)) {
+        const el = F[k];
+        if (!el) continue;
+        if (el instanceof RadioNodeList && typeof def === 'boolean') look[k] = el.value === '1'; // on/off shown as two buttons
+        else look[k] = typeof def === 'boolean' ? el.checked : typeof def === 'number' ? +el.value : el.value;
+      }
+      if (F.badgeFeed.checked) look.badgeColor = '';
+      const clock = { show: F.showClock.checked, format: F.clockFormat.value, timezone: F.clockTimezone.value, label: F.clockLabel.value.trim(), seconds: F.clockSeconds.checked };
+      const settings = { categoryStyle: F.categoryStyle.value, sourceStyle: F.sourceStyle.value };
+      return { look, clock, settings };
+    };
+
+    const refresh = () => {
+      // range read-outs
+      for (const r of $$('input[type=range]', form)) {
+        r.nextElementSibling.textContent = r.dataset.auto != null && +r.value === +r.dataset.auto ? r.dataset.autotext : `${r.value}${r.dataset.unit || ''}`;
+      }
+      // show only the options that apply
+      for (const el of $$('[data-when]', form)) {
+        const cond = el.dataset.when;
+        let on;
+        if (cond.includes('=')) { const [k, v] = cond.split('='); on = F[k].value === v; }
+        else if (cond.startsWith('!')) on = !F[cond.slice(1)].checked;
+        else on = F[cond].checked;
+        el.classList.toggle('off', !on);
+      }
+      const { look, clock, settings } = gather();
+      frame.contentWindow && frame.contentWindow.postMessage({ type: 'louiseticker-preview', look, clock, settings }, location.origin);
+    };
+    frame.addEventListener('load', () => { fit(); refresh(); });
+    form.addEventListener('input', refresh);
+    form.addEventListener('change', refresh);
+    refresh();
+
+    const setValues = (vals) => {
+      for (const [k, v] of Object.entries(vals)) {
+        const el = F[k];
+        if (!el) continue;
+        if (el instanceof RadioNodeList) { const sv = v === true ? '1' : v === false ? '0' : String(v); for (const r of el) r.checked = r.value === sv; }
+        else if (el.type === 'checkbox') el.checked = !!v;
+        else el.value = v;
+      }
+      if ('badgeColor' in vals) { F.badgeFeed.checked = !vals.badgeColor; if (vals.badgeColor) F.badgeColor.value = vals.badgeColor; }
+      refresh();
+    };
+    $$('[data-theme]', dlg).forEach((b) => b.addEventListener('click', () => setValues({ ...(THEMES[+b.dataset.theme][0] === 'Classic red' ? pickColors(st.lookDefaults) : {}), ...THEMES[+b.dataset.theme][2] })));
+    $('#resetLook', dlg).addEventListener('click', () => setValues(st.lookDefaults));
+    $('#dEditCats', dlg).addEventListener('click', (e) => {
+      e.preventDefault();
+      if (confirm('Open the category editor? Unsaved designer changes will be lost.')) openCategories();
+    });
+    $('#copySrc', dlg).addEventListener('click', () => navigator.clipboard.writeText(sourceUrl).then(() => toast('URL copied'), () => $('#srcUrl', dlg).select()));
+
+    form.addEventListener('submit', safe(async (e) => {
+      e.preventDefault();
+      const { look, clock, settings } = gather();
+      await api('PATCH', `/api/outputs/${o.id}`, {
+        look,
+        settings: { ...settings, showClock: clock.show, clockFormat: clock.format, clockTimezone: clock.timezone, clockLabel: clock.label, clockSeconds: clock.seconds },
+      });
+      closeModal(); await loadState(); renderAll(); toast('Ticker updated on air');
+    }));
+  }, { wide: true });
+}
+
+const pickColors = (l) => Object.fromEntries(Object.entries(l).filter(([k]) => /^(bg|fg|accent|labelBg|labelFg|clockBg|clockFg)$/.test(k)));
+
+// ------------------------------------------------------------ categories
+function openCategories() {
+  let cats = (st.categories || []).map((c) => ({ ...c, match: [...(c.match || [])] }));
+  const allItems = () => st.feeds.flatMap((f) => (st.items[f.id] || []).map((it) => [it, f]));
+
+  modal(`${head('Ticker categories')}
+    <form id="catForm" autocomplete="off"><div class="dlg-body">
+      <p class="hint" style="margin-top:0">Stories get a category automatically when one of its <b>match words</b> appears in the story’s RSS category tags or in its web address (e.g. <code>/sport/</code>). The first matching category in this list wins, so use ↑ ↓ to set priority. A feed can also force one category for all its stories (feed settings ⚙), and you can change any story’s category in the output list.</p>
+      <div id="catRows" class="catrows"></div>
+      <button type="button" class="btn small" id="catAdd" style="margin-top:8px">＋ Add category</button>
+      <label class="check" style="margin-top:14px"><input type="checkbox" id="catReapply" checked> Also re-apply to stories already in the outputs <span class="hint">(categories you picked by hand are kept)</span></label>
+    </div>
+    <div class="dlg-foot"><span></span><div class="right"><button type="button" class="btn" data-close-modal>Cancel</button><button class="btn primary">Save categories</button></div></div></form>`,
+  (dlg) => {
+    const rowsEl = $('#catRows', dlg);
+    const sync = () => {
+      $$('.catrow', rowsEl).forEach((row, i) => {
+        cats[i].name = $('[name=name]', row).value;
+        cats[i].color = $('[name=color]', row).value;
+        cats[i].match = $('[name=match]', row).value.split(',').map((x) => x.trim()).filter(Boolean);
+      });
+    };
+    // how many stored stories each category would catch right now
+    const counts = () => {
+      const n = new Map();
+      for (const [it, f] of allItems()) {
+        const id = categorize(it, f, cats.map((c, i) => ({ ...c, id: c.id || `new${i}` })));
+        if (id) n.set(id, (n.get(id) || 0) + 1);
+      }
+      $$('.catrow', rowsEl).forEach((row, i) => { $('.catcount', row).textContent = `${n.get(cats[i].id || `new${i}`) || 0} stories`; });
+    };
+    const render = () => {
+      rowsEl.innerHTML = cats.map((c, i) => `
+        <div class="catrow">
+          <input type="color" name="color" value="${esc(c.color || '#8d95a5')}" title="Colour">
+          <div class="catmain">
+            <input name="name" value="${esc(c.name)}" placeholder="Name, e.g. Sport" maxlength="30">
+            <input name="match" value="${esc((c.match || []).join(', '))}" placeholder="match words, comma separated: football, rugby, tennis">
+          </div>
+          <span class="catcount"></span>
+          <div class="catbtns">
+            <button type="button" class="icon-btn" data-move="${i}:-1" title="Higher priority" ${i === 0 ? 'disabled' : ''}>↑</button>
+            <button type="button" class="icon-btn" data-move="${i}:1" title="Lower priority" ${i === cats.length - 1 ? 'disabled' : ''}>↓</button>
+            <button type="button" class="icon-btn" data-del="${i}" title="Delete">✕</button>
+          </div>
+        </div>`).join('') || '<div class="hint">No categories.</div>';
+      counts();
+    };
+    render();
+    let t = null;
+    rowsEl.addEventListener('input', () => { sync(); clearTimeout(t); t = setTimeout(counts, 250); });
+    rowsEl.addEventListener('click', (e) => {
+      const mv = e.target.closest('[data-move]');
+      const del = e.target.closest('[data-del]');
+      if (!mv && !del) return;
+      sync();
+      if (mv) { const [i, d] = mv.dataset.move.split(':').map(Number); [cats[i], cats[i + d]] = [cats[i + d], cats[i]]; }
+      if (del) cats.splice(+del.dataset.del, 1);
+      render();
+    });
+    $('#catAdd', dlg).addEventListener('click', () => {
+      sync();
+      cats.push({ name: '', color: ['#e4572e', '#29a3d6', '#f2b134', '#6bbf59', '#b86bd6', '#ef6f9a', '#3ec7b0'][cats.length % 7], match: [] });
+      render();
+      $$('.catrow [name=name]', rowsEl).pop().focus();
+    });
+    $('#catForm', dlg).addEventListener('submit', safe(async (e) => {
+      e.preventDefault();
+      sync();
+      await api('PUT', '/api/categories', { categories: cats });
+      if ($('#catReapply', dlg).checked) for (const o of st.outputs) await api('POST', `/api/outputs/${o.id}/recategorize`);
+      closeModal(); await loadState(); renderAll(); toast('Categories saved');
+    }));
+  });
+}
+
+function openCategoryPicker(o, entry) {
+  const cur = entry.category;
+  modal(`${head('Category')}
+    <div class="dlg-body"><div class="hint" style="margin-bottom:12px">${esc(entry.title)}</div>
+      <div class="catpick">${(st.categories || []).map((c) => `<button type="button" class="catbtn ${c.id === cur ? 'on' : ''}" data-cat="${esc(c.id)}" style="--c:${esc(c.color)}">${esc(c.name)}</button>`).join('')}
+        <button type="button" class="catbtn ${!cur ? 'on' : ''}" data-cat="" style="--c:#5f6778">No category</button></div>
+      <p class="hint" style="margin-top:14px"><a href="#" id="pickEdit">Edit categories…</a></p>
+    </div>`,
+  (dlg) => {
+    $$('[data-cat]', dlg).forEach((b) => b.addEventListener('click', safe(async () => {
+      await api('PATCH', `/api/outputs/${o.id}/entries/${entry.id}`, { category: b.dataset.cat || null });
+      closeModal(); await loadState(); renderAll();
+    })));
+    $('#pickEdit', dlg).addEventListener('click', (e) => { e.preventDefault(); openCategories(); });
   });
 }
 

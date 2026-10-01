@@ -8,7 +8,8 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { fetchFeed, escapeXml, parseFeed } = require('./lib/rss');
-const { Store, defaultOutput, DEFAULT_OUTPUT_SETTINGS } = require('./lib/store');
+const { categorize } = require('./public/categorize');
+const { Store, defaultOutput, DEFAULT_OUTPUT_SETTINGS, DEFAULT_LOOK } = require('./lib/store');
 
 const PORT = parseInt(process.env.PORT || '4400', 10);
 const LAN = process.env.LAN === '1';
@@ -45,6 +46,11 @@ function matchesAny(text, keywords) {
 
 const feedById = (id) => S().feeds.find((f) => f.id === id);
 const outputById = (id) => S().outputs.find((o) => o.id === id);
+// Category a story gets when nobody picks one: the feed's own category, plus guessing when it's switched on.
+const autoCategory = (item, feed) => S().settings.autoCategorize === false
+  ? (feed && categoryById(feed.category) ? feed.category : null)
+  : categorize(item, feed, S().categories);
+const categoryById = (id) => (id && S().categories.find((c) => c.id === id)) || null;
 const sourceName = (entry) => {
   const f = entry.feedId && feedById(entry.feedId);
   return (f && (f.shortName || f.title)) || entry.source || '';
@@ -125,6 +131,8 @@ function makeEntry(o, feed, item, extra = {}) {
     expiresAt: h > 0 ? t + h * 3600000 : null,
     breaking: false,
     auto: false,
+    categories: item.categories || [], // the story's own RSS tags, kept for re-categorising
+    category: autoCategory(item, feed),
     ...extra,
   };
 }
@@ -163,6 +171,34 @@ function liveEntries(o) {
 }
 
 const SOURCE_STYLES = ['none', 'prefix', 'suffix', 'badge'];
+const CATEGORY_STYLES = ['none', 'badge', 'text', 'label'];
+
+const LOOK_CHOICES = { mode: ['crawl', 'flip'], transition: ['slide', 'push', 'fade', 'none'], position: ['bottom', 'top'] };
+const LOOK_LIMITS = { speed: [10, 1000], flipSeconds: [1, 120], margin: [0, 400], radius: [0, 200], fontSize: [8, 200], fontWeight: [100, 900], height: [0, 600], bgOpacity: [0, 100], maxLines: [1, 4], breakingEvery: [0, 20] };
+const COLOR_RE = /^#[0-9a-f]{6}$/i;
+
+// Merge user-supplied look values over the current ones, ignoring anything invalid.
+function sanitizeLook(input, current) {
+  const look = { ...DEFAULT_LOOK, ...(current || {}) };
+  for (const [k, def] of Object.entries(DEFAULT_LOOK)) {
+    if (!(k in input)) continue;
+    const v = input[k];
+    if (typeof def === 'boolean') look[k] = !!v;
+    else if (typeof def === 'number') {
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      const [lo, hi] = LOOK_LIMITS[k] || [0, 1e6];
+      look[k] = Math.min(hi, Math.max(lo, n));
+    } else if (LOOK_CHOICES[k]) {
+      if (LOOK_CHOICES[k].includes(v)) look[k] = v;
+    } else if (/^(bg|fg|accent|labelBg|labelFg|clockBg|clockFg|badgeColor)$/.test(k)) {
+      if (COLOR_RE.test(v) || (k === 'badgeColor' && v === '')) look[k] = v;
+    } else {
+      look[k] = String(v ?? '').slice(0, 500);
+    }
+  }
+  return look;
+}
 
 // Headline alone: truncated (so the source is never cut off) and cased.
 function formatTitle(e, o) {
@@ -180,6 +216,8 @@ function formatHeadline(e, o, withLabel = true) {
   if (s.uppercase) src = src.toUpperCase();
   if (src && (s.sourceStyle === 'prefix' || s.sourceStyle === 'badge')) t = `${src}: ${t}`;
   if (src && s.sourceStyle === 'suffix') t = `${t} (${src})`;
+  const cat = s.categoryStyle !== 'none' && categoryById(e.category);
+  if (cat) t = `${s.uppercase ? cat.name.toUpperCase() : cat.name} | ${t}`;
   if (withLabel && e.breaking && s.breakingLabel) t = `${s.uppercase ? s.breakingLabel.toUpperCase() : s.breakingLabel}: ${t}`;
   return t;
 }
@@ -202,6 +240,7 @@ function renderRss(o, req) {
       <pubDate>${new Date(e.date || e.addedAt).toUTCString()}</pubDate>
       ${desc ? `<description>${escapeXml(desc)}</description>` : ''}
       ${e.breaking ? '<category>Breaking</category>' : ''}
+      ${categoryById(e.category) ? `<category>${escapeXml(categoryById(e.category).name)}</category>` : ''}
       ${sourceName(e) ? `<source url="${escapeXml(f ? f.url : self)}">${escapeXml(sourceName(e))}</source>` : ''}
     </item>`.replace(/\n\s*\n/g, '\n');
   });
@@ -230,6 +269,8 @@ function renderJson(o) {
     breakingLabel: o.settings.breakingLabel,
     uppercase: !!o.settings.uppercase,
     sourceStyle: o.settings.sourceStyle,
+    categoryStyle: o.settings.categoryStyle,
+    look: o.look,
     clock: {
       show: o.settings.showClock,
       format: o.settings.clockFormat,
@@ -245,6 +286,7 @@ function renderJson(o) {
       text: formatHeadline(e, o, true),
       source: sourceName(e),
       sourceColor: (e.feedId && feedById(e.feedId) || {}).color || null,
+      category: categoryById(e.category) ? { id: e.category, name: categoryById(e.category).name, color: categoryById(e.category).color } : null,
       breaking: !!e.breaking,
       link: e.link,
       date: e.date,
@@ -358,7 +400,9 @@ route('GET', /^\/api\/state$/, (req, res) => ok(res, {
   settings: S().settings,
   feeds: S().feeds.map(publicFeed),
   outputs: S().outputs.map(({ dismissed, ...o }) => o),
+  categories: S().categories,
   defaults: DEFAULT_OUTPUT_SETTINGS,
+  lookDefaults: DEFAULT_LOOK,
   server: { port: PORT, lan: HOST !== '127.0.0.1', lanUrls: HOST !== '127.0.0.1' ? lanUrls() : [], canEdit: true },
 }));
 
@@ -368,6 +412,7 @@ route('GET', /^\/api\/feeds\/([\w]+)\/items$/, (req, res, [id]) => ok(res, S().i
 route('PATCH', /^\/api\/settings$/, async (req, res) => {
   const b = await readJson(req);
   if (b.refreshMinutes != null) S().settings.refreshMinutes = Math.max(1, Number(b.refreshMinutes) || 10);
+  if (typeof b.autoCategorize === 'boolean') S().settings.autoCategorize = b.autoCategorize;
   if (b.maxItemsPerFeed != null) S().settings.maxItemsPerFeed = Math.min(1000, Math.max(10, Number(b.maxItemsPerFeed) || 150));
   store.save();
   broadcast('state');
@@ -402,6 +447,7 @@ route('PATCH', /^\/api\/feeds\/(\w+)$/, async (req, res, [id]) => {
   if (typeof b.title === 'string' && b.title.trim() && b.title.trim() !== f.title) { f.title = b.title.trim(); f.customTitle = true; }
   if (typeof b.shortName === 'string') f.shortName = b.shortName.trim();
   if (typeof b.color === 'string') f.color = b.color;
+  if (typeof b.category === 'string') f.category = categoryById(b.category) ? b.category : '';
   if (typeof b.enabled === 'boolean') f.enabled = b.enabled;
   if (b.refreshMinutes != null) f.refreshMinutes = Math.max(0, Number(b.refreshMinutes) || 0);
   if (typeof b.url === 'string' && b.url.trim() && b.url.trim() !== f.url) { f.url = b.url.trim(); f.lastFetched = null; }
@@ -462,6 +508,44 @@ route('POST', /^\/api\/opml$/, async (req, res) => {
   scheduler(); // fetch the new ones right away
 });
 
+// Categories: replace the whole list (order = matching priority).
+route('PUT', /^\/api\/categories$/, async (req, res) => {
+  const { categories } = await readJson(req);
+  if (!Array.isArray(categories)) return fail(res, 400, 'categories must be a list');
+  const seen = new Set();
+  const clean = [];
+  for (const c of categories) {
+    const name = String(c.name || '').trim().slice(0, 30);
+    if (!name) continue;
+    let id = String(c.id || '') || slugify(name);
+    while (seen.has(id)) id = `${slugify(name)}-${rid(3).toLowerCase()}`;
+    seen.add(id);
+    const match = (Array.isArray(c.match) ? c.match : String(c.match || '').split(/[,\n]/)).map((x) => String(x).trim()).filter(Boolean).slice(0, 100);
+    clean.push({ id, name, color: /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : '#8d95a5', match });
+  }
+  S().categories = clean;
+  for (const f of S().feeds) if (f.category && !seen.has(f.category)) f.category = '';
+  store.save();
+  broadcast('state');
+  for (const o of S().outputs) broadcast('output', { id: o.id });
+  ok(res, clean);
+});
+
+// Re-run automatic categorisation on an output's items (keeps categories picked by hand).
+route('POST', /^\/api\/outputs\/([\w-]+)\/recategorize$/, (req, res, [id]) => {
+  const o = outputById(id);
+  if (!o) return fail(res, 404, 'No such output');
+  let changed = 0;
+  for (const e of o.entries) {
+    if (e.categoryManual || e.custom) continue;
+    const item = (S().items[e.feedId] || []).find((i) => i.id === e.itemId) || { link: e.link, categories: e.categories || [] };
+    const c = autoCategory(item, feedById(e.feedId));
+    if (c !== e.category) { e.category = c; changed++; }
+  }
+  outputChanged(o);
+  ok(res, { changed });
+});
+
 // Outputs
 route('POST', /^\/api\/outputs$/, async (req, res) => {
   const b = await readJson(req);
@@ -491,8 +575,10 @@ route('PATCH', /^\/api\/outputs\/([\w-]+)$/, async (req, res, [id]) => {
       o.settings[k] = typeof def === 'number' ? Math.max(0, Number(b.settings[k]) || 0) : typeof def === 'boolean' ? !!b.settings[k] : String(b.settings[k]);
     }
     if (!SOURCE_STYLES.includes(o.settings.sourceStyle)) o.settings.sourceStyle = 'none';
+    if (!CATEGORY_STYLES.includes(o.settings.categoryStyle)) o.settings.categoryStyle = 'badge';
     if (!['12h', '24h'].includes(o.settings.clockFormat)) o.settings.clockFormat = '24h';
   }
+  if (b.look) o.look = sanitizeLook(b.look, o.look);
   if (b.rules) {
     const list = (v) => (Array.isArray(v) ? v : String(v || '').split(/[,\n]/)).map((x) => String(x).trim()).filter(Boolean);
     if ('include' in b.rules) o.rules.include = list(b.rules.include);
@@ -525,11 +611,13 @@ route('POST', /^\/api\/outputs\/([\w-]+)\/entries$/, async (req, res, [id]) => {
       if (!feed || !item) continue;
       if (o.entries.some((e) => e.itemId === item.id)) continue;
       o.dismissed = o.dismissed.filter((x) => x !== item.id);
-      const e = makeEntry(o, feed, item, { breaking: !!r.breaking });
+      // a category picked while adding ("" = none) overrides the automatic one
+      const picked = 'category' in r ? { category: categoryById(r.category) ? r.category : null, categoryManual: true } : {};
+      const e = makeEntry(o, feed, item, { breaking: !!r.breaking, ...picked });
       r.top ? o.entries.unshift(e) : o.entries.push(e);
       added.push(e);
     } else if (r.title && String(r.title).trim()) {
-      const e = makeEntry(o, null, { title: String(r.title).trim(), link: r.link || null }, { source: r.source || '', custom: true, breaking: !!r.breaking });
+      const e = makeEntry(o, null, { title: String(r.title).trim(), link: r.link || null }, { source: r.source || '', custom: true, breaking: !!r.breaking, category: categoryById(r.category) ? r.category : null });
       if (r.expiresInMinutes) e.expiresAt = now() + Number(r.expiresInMinutes) * 60000;
       r.top ? o.entries.unshift(e) : o.entries.push(e);
       added.push(e);
@@ -548,6 +636,7 @@ route('PATCH', /^\/api\/outputs\/([\w-]+)\/entries\/(\w+)$/, async (req, res, [i
   if (b.resetTitle) e.title = e.originalTitle;
   if (typeof b.breaking === 'boolean') e.breaking = b.breaking;
   if (typeof b.hold === 'boolean') e.hold = b.hold;
+  if ('category' in b) { e.category = categoryById(b.category) ? b.category : null; e.categoryManual = true; }
   if (typeof b.source === 'string' && e.custom) e.source = b.source;
   if ('expiresAt' in b) e.expiresAt = b.expiresAt ? Number(b.expiresAt) : null;
   outputChanged(o);
