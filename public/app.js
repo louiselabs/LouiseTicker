@@ -55,8 +55,216 @@ async function api(method, path, body, raw = false) {
     body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
+  // session expired or logged out elsewhere: back to the login screen
+  if (res.status === 401 && path !== '/api/login') { showLogin('Your session has ended — please log in again.'); throw new Error('Please log in'); }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
+}
+
+// ------------------------------------------------------------ accounts
+const isAdmin = () => st.me && st.me.role === 'admin';
+
+function showLogin(message = '') {
+  document.body.classList.add('signed-out');
+  if ($('#modal').open) closeModal();
+  $('#loginErr').textContent = message;
+  $('#loginForm [name=username]').focus();
+}
+
+function setMe(user) {
+  st.me = user;
+  document.body.classList.remove('signed-out', 'role-admin', 'role-journalist');
+  document.body.classList.add(`role-${user.role}`);
+  $('#btnUser').innerHTML = `👤 ${esc(user.name || user.username)}<span class="role-tag ${user.role}">${user.role}</span>`;
+  $('#defaultPwBanner').hidden = !user.defaultPassword;
+}
+
+function wireAccount() {
+  $('#loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    $('#loginErr').textContent = '';
+    try {
+      await api('POST', '/api/login', { username: f.username.value, password: f.password.value });
+      location.reload(); // start the app fresh as this user
+    } catch (err) {
+      $('#loginErr').textContent = err.message;
+      f.password.select();
+    }
+  });
+  $('#btnUser').addEventListener('click', (e) => { e.stopPropagation(); $('#userMenu').hidden = !$('#userMenu').hidden; });
+  document.addEventListener('click', () => { $('#userMenu').hidden = true; });
+  const userAction = safe(async (what) => {
+    $('#userMenu').hidden = true;
+    if (what === 'password') return openChangePassword();
+    if (what === 'users') return openUsers();
+    if (what === 'logout') { await api('POST', '/api/logout'); location.reload(); }
+  });
+  for (const b of $$('[data-u]')) b.addEventListener('click', () => userAction(b.dataset.u));
+  $('#btnAsrun').addEventListener('click', () => openAsrun());
+}
+
+function openChangePassword() {
+  modal(`${head('Change my password')}
+    <form id="pwForm"><div class="dlg-body">
+      <label class="field"><span>Current password</span><input name="current" type="password" autocomplete="current-password" required></label>
+      <label class="field"><span>New password</span><input name="next" type="password" autocomplete="new-password" minlength="6" required><small>At least 6 characters. Your other devices will be logged out.</small></label>
+      <label class="field"><span>New password again</span><input name="again" type="password" autocomplete="new-password" required></label>
+      <div class="err-msg" id="pwErr"></div>
+    </div>
+    <div class="dlg-foot"><span></span><div class="right"><button type="button" class="btn" data-close-modal>Cancel</button><button class="btn primary">Change password</button></div></div></form>`,
+  (dlg) => {
+    $('#pwForm', dlg).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      if (f.next.value !== f.again.value) { $('#pwErr', dlg).textContent = 'The two new passwords are different.'; return; }
+      try {
+        await api('POST', '/api/me/password', { current: f.current.value, next: f.next.value });
+        closeModal();
+        setMe({ ...st.me, defaultPassword: false });
+        toast('Password changed');
+      } catch (err) { $('#pwErr', dlg).textContent = err.message; }
+    });
+  });
+}
+
+function openUsers() {
+  const render = async (dlg) => {
+    const users = await api('GET', '/api/users');
+    $('#userRows', dlg).innerHTML = users.map((u) => `<tr data-id="${u.id}">
+      <td><b>${esc(u.username)}</b>${u.id === st.me.id ? ' <span class="hint">(you)</span>' : ''}<div class="det">${esc(u.name)}</div></td>
+      <td><select data-role ${u.id === st.me.id ? 'disabled title="You can’t change your own role"' : ''}>${['journalist', 'admin'].map((r) => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select></td>
+      <td>${u.disabled ? '<span class="tag">DISABLED</span>' : u.defaultPassword ? '<span class="tag chg">DEFAULT PASSWORD</span>' : '<span class="tag new">ACTIVE</span>'}</td>
+      <td class="when">${u.lastLogin ? timeAgo(u.lastLogin) : 'never'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn small" data-reset>Reset password</button>
+        ${u.id === st.me.id ? '' : `<button class="btn small" data-toggle>${u.disabled ? 'Enable' : 'Disable'}</button><button class="btn small danger" data-del>Delete</button>`}
+      </td></tr>`).join('');
+  };
+  modal(`${head('Accounts')}
+    <div class="dlg-body">
+      <div class="table-wrap"><table class="grid"><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead><tbody id="userRows"></tbody></table></div>
+      <div class="section-title">New account</div>
+      <form id="newUser" autocomplete="off">
+        <div class="row2">
+          <label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9._-]{2,32}" placeholder="e.g. marie.dupont"></label>
+          <label class="field"><span>Full name</span><input name="name" placeholder="Marie Dupont"></label>
+        </div>
+        <div class="row2">
+          <label class="field"><span>Temporary password</span><input name="password" type="text" minlength="6" required><small>Give it to the person; they can change it from their account menu.</small></label>
+          <label class="field"><span>Role</span><select name="role"><option value="journalist">Journalist — news, stories, TAKE</option><option value="admin">Admin — also settings, accounts, outputs, design</option></select></label>
+        </div>
+        <div class="err-msg" id="newUserErr"></div>
+        <button class="btn primary">Create account</button>
+      </form>
+    </div>
+    <div class="dlg-foot"><span class="hint">All account changes are recorded in the as-run log.</span><div class="right"><button class="btn" data-close-modal>Close</button></div></div>`,
+  (dlg) => {
+    render(dlg).catch((e) => toast(e.message, true));
+    $('#newUser', dlg).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        await api('POST', '/api/users', Object.fromEntries(new FormData(f)));
+        toast(`Account “${f.username.value}” created`);
+        f.reset();
+        $('#newUserErr', dlg).textContent = '';
+        await render(dlg);
+      } catch (err) { $('#newUserErr', dlg).textContent = err.message; }
+    });
+    const rows = $('#userRows', dlg);
+    rows.addEventListener('change', safe(async (e) => {
+      const tr = e.target.closest('tr');
+      if (e.target.matches('[data-role]')) { await api('PATCH', `/api/users/${tr.dataset.id}`, { role: e.target.value }); toast('Role changed'); await render(dlg); }
+    }));
+    rows.addEventListener('click', safe(async (e) => {
+      const tr = e.target.closest('tr');
+      if (!tr) return;
+      const name = $('b', tr).textContent;
+      if (e.target.closest('[data-reset]')) {
+        const pw = prompt(`New password for “${name}” (at least 6 characters):`);
+        if (!pw) return;
+        await api('PATCH', `/api/users/${tr.dataset.id}`, { password: pw });
+        toast('Password reset — the account was logged out everywhere');
+      }
+      if (e.target.closest('[data-toggle]')) {
+        const disable = e.target.textContent.trim() === 'Disable';
+        await api('PATCH', `/api/users/${tr.dataset.id}`, { disabled: disable });
+      }
+      if (e.target.closest('[data-del]')) {
+        if (!confirm(`Delete the account “${name}”? Its as-run history is kept.`)) return;
+        await api('DELETE', `/api/users/${tr.dataset.id}`);
+      }
+      await render(dlg);
+    }));
+  }, { wide: true });
+}
+
+// ------------------------------------------------------------ as-run log
+const ACTION_NAMES = {
+  take: 'TAKE', revert: 'Revert', 'air.on': 'On air (schedule)', 'air.off': 'Off air (schedule)', 'air.end': 'Ended',
+  'entry.add': 'Added', 'entry.edit': 'Edited', 'entry.remove': 'Removed', 'entry.order': 'Reordered', 'entry.category': 'Categories', clear: 'Cleared',
+  login: 'Login', logout: 'Logout', 'login.failed': 'Failed login', 'user.create': 'Account', 'user.edit': 'Account', 'user.delete': 'Account', 'user.password': 'Password',
+  'feed.add': 'Feed', 'feed.edit': 'Feed', 'feed.delete': 'Feed', 'feed.import': 'Feed', categories: 'Categories', settings: 'Settings',
+  'output.create': 'Output', 'output.delete': 'Output', 'output.settings': 'Output', 'output.design': 'Design', 'output.rules': 'Keyword rules', 'output.copy': 'Copy',
+};
+
+function openAsrun() {
+  const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const toDate = (ts) => new Date(ts - new Date(ts).getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  modal(`${head('As-run log')}
+    <div class="dlg-body">
+      <form class="filters" id="asrunFilters">
+        <input type="date" name="from" value="${toDate(day(new Date()).getTime())}" title="From day">
+        <input type="date" name="to" value="${toDate(Date.now())}" title="To day">
+        <select name="action">
+          <option value="">Everything</option>
+          <option value="take">TAKEs (what went on air)</option>
+          <option value="air.">Scheduled on / off air</option>
+          <option value="entry.">Story changes</option>
+          <option value="login">Logins</option>
+          <option value="user.">Accounts</option>
+          <option value="feed.">Feeds</option>
+          <option value="output.">Outputs &amp; design</option>
+          <option value="settings">Settings</option>
+        </select>
+        <select name="output"><option value="">All outputs</option>${st.outputs.map((o) => `<option value="${o.id}">${esc(o.name)}</option>`).join('')}</select>
+        <input name="user" placeholder="Account (e.g. marie)" size="14">
+        <input name="q" placeholder="Search text…" size="16">
+        <a class="btn small admin-only" id="asrunCsv" href="#" download>⤓ Export CSV</a>
+      </form>
+      <div class="table-wrap"><table class="grid"><thead><tr><th>Time</th><th>Account</th><th>Action</th><th>Output</th><th>What</th></tr></thead><tbody id="asrunRows"><tr><td colspan="5">Loading…</td></tr></tbody></table></div>
+      <p class="hint" id="asrunCount"></p>
+    </div>
+    <div class="dlg-foot"><span class="hint">“system” = schedule and end times · “keyword rule” = stories added by auto-add rules.</span><div class="right"><button class="btn" data-close-modal>Close</button></div></div>`,
+  (dlg) => {
+    const form = $('#asrunFilters', dlg);
+    const params = () => {
+      const f = form.elements;
+      const p = new URLSearchParams({ limit: '1000' });
+      if (f.from.value) p.set('from', new Date(f.from.value + 'T00:00').getTime());
+      if (f.to.value) p.set('to', new Date(f.to.value + 'T23:59:59.999').getTime());
+      for (const k of ['action', 'output', 'user', 'q']) if (f[k].value.trim()) p.set(k, k === 'user' ? f[k].value.trim().toLowerCase() : f[k].value.trim());
+      return p;
+    };
+    let t = null;
+    const load = safe(async () => {
+      const p = params();
+      $('#asrunCsv', dlg).href = `/api/asrun.csv?${p}`;
+      const rows = await api('GET', `/api/asrun?${p}`);
+      const outName = (id) => (st.outputs.find((o) => o.id === id) || {}).name || id || '';
+      $('#asrunRows', dlg).innerHTML = rows.map((r) => `<tr>
+        <td class="when">${new Date(r.t).toLocaleDateString([], { day: '2-digit', month: 'short' })} ${new Date(r.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
+        <td>${esc(r.user)}${r.role && !['system', '—'].includes(r.role) ? `<span class="role-tag ${esc(r.role)}">${esc(r.role)}</span>` : ''}</td>
+        <td><span class="act ${esc(String(r.action).replace(/\./g, '-'))}">${esc(ACTION_NAMES[r.action] || r.action)}</span></td>
+        <td>${esc(outName(r.output))}</td>
+        <td>${esc(r.summary)}${r.details ? `<div class="det">${esc(r.details)}</div>` : ''}</td></tr>`).join('') || '<tr><td colspan="5" class="hint">Nothing recorded for these filters.</td></tr>';
+      $('#asrunCount', dlg).textContent = `${rows.length}${rows.length >= 1000 ? '+' : ''} entries, newest first.`;
+    });
+    form.addEventListener('input', () => { clearTimeout(t); t = setTimeout(load, 250); });
+    form.addEventListener('submit', (e) => e.preventDefault());
+    load();
+  }, { xwide: true });
 }
 const safe = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, true); } };
 
@@ -262,7 +470,7 @@ function renderList(i) {
       <div class="body">
         <div class="meta">${p.tab === 'all' ? `<span class="src" style="color:${esc(f.color)}">${esc(f.shortName || f.title)}</span>·` : ''}
           <time title="${esc(it.date || '')}">${timeAgo(it.date || it.firstSeen)}</time>
-          ${isNew ? '<span class="new">NEW</span>' : ''}${picked ? `<span class="inout">● in ${esc(o.name)}${sel.get(it.id).breaking ? ' · BREAKING' : ''}</span>` : ''}
+          ${isNew ? '<span class="new">NEW</span>' : ''}${picked ? `<span class="inout">● ${o.takeMode && !o.program.some((p) => p.itemId === it.id) ? 'in preview of' : 'on air in'} ${esc(o.name)}${sel.get(it.id).breaking ? ' · BREAKING' : ''}</span>` : ''}
           ${it.author ? `<span>· ${esc(it.author)}</span>` : ''}
           ${(() => { const c = categoryById(suggestCategory(it, f)); return c ? catChip(c, `title="Ticker category${(it.categories || []).length ? ` · RSS tags: ${esc(it.categories.join(', '))}` : ''}"`) : ''; })()}</div>
         <h3>${hl(it.title)}</h3>
@@ -409,8 +617,11 @@ function renderOutput() {
     + (st.server.lanUrls && st.server.lanUrls.length ? `<span class="hint" title="Use this address from other machines">LAN: ${esc(st.server.lanUrls[0])}/out/${o.id}.rss</span>` : '');
 
   const now = Date.now();
-  const live = o.entries.filter((e) => !e.hold && (!e.expiresAt || e.expiresAt > now));
+  const tz = o.settings.clockTimezone || '';
+  const diff = diffOutput(o);
+  const live = (o.takeMode ? o.program : o.entries).filter((e) => schedule.isOnAir(e, now, tz));
   const brk = live.filter((e) => e.breaking).length;
+  renderTakebar(o, diff);
   const capped = o.settings.maxItems > 0 && live.length > o.settings.maxItems;
   $('#opStats').innerHTML = `<span><b>${Math.min(live.length, o.settings.maxItems || Infinity)}</b> on air${brk ? ` · <span style="color:var(--accent-2)">${brk} breaking</span>` : ''}${capped ? ` · ${live.length - o.settings.maxItems} over limit` : ''}</span>
     <span>${o.rules.include.length ? `auto: ${esc(o.rules.include.slice(0, 3).join(', '))}${o.rules.include.length > 3 ? '…' : ''}` : ''}${o.settings.newestFirst ? ' · sorted newest' : ''}</span>`;
@@ -423,38 +634,102 @@ function renderOutput() {
     let list = o.entries;
     if (o.settings.newestFirst) list = [...list].sort((a, b) => (Date.parse(b.date || '') || b.addedAt) - (Date.parse(a.date || '') || a.addedAt));
     if (o.settings.breakingFirst) list = [...list.filter((e) => e.breaking), ...list.filter((e) => !e.breaking)];
-    ol.innerHTML = list.map((e) => {
-      const f = feedById(e.feedId);
-      const src = f ? f.shortName || f.title : e.source || 'Custom';
-      const edited = e.originalTitle && e.title !== e.originalTitle;
-      return `<li class="entry ${e.breaking ? 'breaking' : ''} ${e.hold ? 'hold' : ''}" draggable="true" data-id="${e.id}">
-        <div class="grip" title="Drag to reorder">⋮⋮</div>
-        <div class="txt">
-          <div class="hl" title="Double-click to edit">${esc(e.title)}</div>
-          <div class="emeta">
-            ${e.breaking ? '<span class="tag brk">BREAKING</span>' : ''}${e.hold ? '<span class="tag">HELD</span>' : ''}${e.auto ? '<span class="tag auto" title="Added by a keyword rule">AUTO</span>' : ''}${e.custom ? '<span class="tag">CUSTOM</span>' : ''}${edited ? '<span class="tag edit" title="Original: ' + esc(e.originalTitle) + '">EDITED</span>' : ''}
-            ${categoryById(e.category) ? catChip(categoryById(e.category), 'data-act="category" title="Change category" role="button"') : '<span class="tag cat-none" data-act="category" title="Set a category" role="button">+ CATEGORY</span>'}
-            <span style="color:${esc(f ? f.color : 'var(--muted)')}">${esc(src)}</span>
-            <span>· added ${timeAgo(e.addedAt)}</span>
-            ${e.expiresAt ? `<span>· ⏱ ${timeLeft(e.expiresAt)}</span>` : ''}
-          </div>
-        </div>
-        <div class="eacts">
-          <button class="icon-btn ${e.breaking ? 'on' : ''}" data-act="breaking" title="Toggle breaking">⚡</button>
-          <button class="icon-btn" data-act="hold" title="${e.hold ? 'Put back on air' : 'Hold (keep but take off air)'}">${e.hold ? '▶' : '⏸'}</button>
-          <button class="icon-btn" data-act="edit" title="Edit headline">✎</button>
-          ${edited ? '<button class="icon-btn" data-act="reset" title="Restore original headline">↺</button>' : ''}
-          <button class="icon-btn" data-act="expiry" title="Set expiry">⏱</button>
-          ${e.link ? `<a class="icon-btn" href="${esc(e.link)}" target="_blank" rel="noopener" title="Open article">↗</a>` : ''}
-          <button class="icon-btn" data-act="remove" title="Remove">✕</button>
-        </div>
-      </li>`;
-    }).join('');
+    ol.innerHTML = list.map((e) => entryHtml(e, o, diff, now, tz)).join('');
   }
-  const src = `/ticker?out=${encodeURIComponent(o.id)}&embed=1`;
-  const frame = $('#previewFrame');
-  if (frame.dataset.src !== src) { frame.dataset.src = src; frame.src = src; }
+  // items on air that TAKE will remove
+  if (diff && diff.removed.length) {
+    ol.insertAdjacentHTML('beforeend', `<li class="removed-head">Removed on TAKE (${diff.removed.length})</li>`
+      + diff.removed.map((e) => `<li class="entry removed"><div class="grip"></div><div class="txt"><div class="hl">${esc(entryText(e))}</div></div></li>`).join(''));
+  }
+
+  // multiviewer: PVW = preview, PGM = on air
+  document.body.classList.toggle('direct', !o.takeMode);
+  const setSrc = (frame, src) => { if (frame.dataset.src !== src) { frame.dataset.src = src; frame.src = src; } };
+  setSrc($('#previewFrame'), `/ticker?out=${encodeURIComponent(o.id)}&embed=1`);
+  setSrc($('#pvwFrame'), `/ticker?out=${encodeURIComponent(o.id)}&embed=1&view=preview`);
 }
+
+// Text shown for an entry: live-data lines come from the server's data cache.
+const dataInfo = (e) => (e.data && (st.data || {})[JSON.stringify(e.data)]) || null;
+const entryText = (e) => {
+  if (!e.data) return e.title;
+  const d = dataInfo(e);
+  return d && d.lines && d.lines.length ? d.lines.join('  /  ') : `${e.title} (loading…)`;
+};
+
+function entryHtml(e, o, diff, now, tz) {
+  const f = feedById(e.feedId);
+  const src = f ? f.shortName || f.title : e.data ? 'Open-Meteo' : e.source || 'Custom';
+  const edited = !e.data && e.originalTitle && e.title !== e.originalTitle;
+  const change = diff && diff.status.get(e.id);
+  const sc = schedule.status(e, now, tz);
+  const when = schedule.describe(e, now);
+  const d = dataInfo(e);
+  return `<li class="entry ${e.breaking ? 'breaking' : ''} ${e.hold ? 'hold' : ''} ${sc.onAir ? '' : 'offair'}" draggable="true" data-id="${e.id}">
+    <div class="grip" title="Drag to reorder">⋮⋮</div>
+    <div class="txt">
+      <div class="hl" title="${e.data ? 'Live data — ✎ to change places and fields' : 'Double-click to edit'}">${esc(entryText(e))}</div>
+      <div class="emeta">
+        ${change === 'new' ? '<span class="tag new" title="Not on air yet — press TAKE">NEW</span>' : ''}${change === 'changed' ? '<span class="tag chg" title="Differs from what is on air — press TAKE">CHANGED</span>' : ''}
+        ${e.breaking ? '<span class="tag brk">BREAKING</span>' : ''}${e.hold ? '<span class="tag">HELD</span>' : ''}${e.auto ? '<span class="tag auto" title="Added by a keyword rule">AUTO</span>' : ''}${e.custom && !e.data ? '<span class="tag">CUSTOM</span>' : ''}${edited ? '<span class="tag edit" title="Original: ' + esc(e.originalTitle) + '">EDITED</span>' : ''}
+        ${e.data ? `<span class="tag live" title="Updates automatically, no TAKE needed">🌤 LIVE${d && d.updatedAt ? ` · ${timeAgo(d.updatedAt)}` : ''}</span>${d && d.error ? `<span class="tag err" title="${esc(d.error)}">⚠ last update failed</span>` : ''}` : ''}
+        ${when || !sc.onAir ? `<span class="tag sched ${sc.state}" data-act="timing" role="button" title="Change timing">⏰ ${esc([when, sc.state === 'on' ? 'on now' : sc.state === 'waiting' && when.includes('from') ? '' : sc.text].filter(Boolean).join(' · '))}</span>` : ''}
+        ${categoryById(e.category) ? catChip(categoryById(e.category), 'data-act="category" title="Change category" role="button"') : '<span class="tag cat-none" data-act="category" title="Set a category" role="button">+ CATEGORY</span>'}
+        <span style="color:${esc(f ? f.color : 'var(--muted)')}">${esc(src)}</span>
+        <span>· added ${timeAgo(e.addedAt)}${e.addedBy ? ` by ${esc(e.addedBy)}` : ''}${e.editedBy && e.editedBy !== e.addedBy ? ` · edited by ${esc(e.editedBy)}` : ''}</span>
+      </div>
+    </div>
+    <div class="eacts">
+      <button class="icon-btn ${e.breaking ? 'on' : ''}" data-act="breaking" title="Toggle breaking">⚡</button>
+      <button class="icon-btn" data-act="hold" title="${e.hold ? 'Put back on air' : 'Hold (keep but take off air)'}">${e.hold ? '▶' : '⏸'}</button>
+      <button class="icon-btn" data-act="edit" title="${e.data ? 'Change places and fields' : 'Edit headline'}">✎</button>
+      ${edited ? '<button class="icon-btn" data-act="reset" title="Restore original headline">↺</button>' : ''}
+      <button class="icon-btn ${when ? 'on' : ''}" data-act="timing" title="Timing: start, end, daily window">⏰</button>
+      ${e.link ? `<a class="icon-btn" href="${esc(e.link)}" target="_blank" rel="noopener" title="Open article">↗</a>` : ''}
+      <button class="icon-btn" data-act="remove" title="Remove">✕</button>
+    </div>
+  </li>`;
+}
+
+// Preview vs on air: which entries are new or changed, which will be removed, and whether the order differs.
+function diffOutput(o) {
+  if (!o.takeMode) return null;
+  const prog = new Map(o.program.map((e) => [e.id, e]));
+  const fields = (e) => JSON.stringify([e.title, !!e.breaking, !!e.hold, e.category || null, e.startsAt || null, e.expiresAt || null, e.repeat || null, e.data || null]);
+  const status = new Map();
+  let changes = 0;
+  for (const e of o.entries) {
+    const p = prog.get(e.id);
+    if (!p) { status.set(e.id, 'new'); changes++; }
+    else if (fields(p) !== fields(e)) { status.set(e.id, 'changed'); changes++; }
+  }
+  const ids = new Set(o.entries.map((e) => e.id));
+  const removed = o.program.filter((p) => !ids.has(p.id));
+  changes += removed.length;
+  const order = (list) => list.filter((e) => prog.has(e.id) && ids.has(e.id)).map((e) => e.id).join();
+  const reordered = order(o.entries) !== order(o.program);
+  if (reordered) changes++;
+  return { status, removed, reordered, changes };
+}
+
+function renderTakebar(o, diff) {
+  const tb = $('#takebar');
+  if (!o.takeMode) { tb.innerHTML = '<span class="direct-note">Direct mode: changes go on air immediately (switch in ⚙ output settings).</span>'; return; }
+  const n = diff.changes;
+  tb.innerHTML = `<button class="btn take ${n ? 'pending' : ''}" id="btnTake" ${n ? '' : 'disabled'} title="Put the preview on air (Ctrl+Enter)">TAKE${n ? `<span class="count">${n}</span>` : ''}</button>
+    <div class="takeinfo">${n ? `<b>${n}</b> change${n === 1 ? '' : 's'} waiting in preview${diff.reordered ? ' · order changed' : ''}` : 'Preview matches what is on air'}<br>
+      <span class="hint">Last TAKE ${o.programAt ? timeAgo(o.programAt) : '—'} · Ctrl+Enter</span></div>
+    <button class="btn small" id="btnRevert" ${n ? '' : 'disabled'} title="Throw away preview changes and go back to what is on air">Revert</button>`;
+}
+
+const take = safe(async () => {
+  const o = currentOutput();
+  if (!o.takeMode || !diffOutput(o).changes) return;
+  await api('POST', `/api/outputs/${o.id}/take`);
+  await loadState();
+  renderAll();
+  toast('On air ✓');
+});
 
 function wireOutput() {
   $('#outputSelect').addEventListener('change', (e) => { prefs.output = e.target.value; renderAll(); });
@@ -479,7 +754,8 @@ function wireOutput() {
     const title = $('#customText').value.trim();
     if (!title) return;
     const breaking = $('#customBreaking').checked;
-    await api('POST', `/api/outputs/${currentOutput().id}/entries`, { title, breaking, top: breaking, category: $('#customCategory').value });
+    await api('POST', `/api/outputs/${currentOutput().id}/entries`, { title, breaking, top: breaking, category: $('#customCategory').value, ...(pendingTiming || {}) });
+    setPendingTiming(null);
     $('#customText').value = '';
     $('#customBreaking').checked = false;
     await loadState();
@@ -493,6 +769,20 @@ function wireOutput() {
     renderAll();
   }));
   $('#btnCopyTo').addEventListener('click', () => openCopyTo());
+  $('#customTiming').addEventListener('click', () => openTiming({
+    title: $('#customText').value.trim() || 'New custom line', timing: pendingTiming || {}, tz: currentOutput().settings.clockTimezone,
+    onSave: (t) => setPendingTiming(t.startsAt || t.expiresAt || t.repeat ? t : null),
+  }));
+  $('#btnLiveData').addEventListener('click', () => openWeather());
+  $('#takebar').addEventListener('click', safe(async (e) => {
+    if (e.target.closest('#btnTake')) return take();
+    if (e.target.closest('#btnRevert')) {
+      const o = currentOutput();
+      if (!confirm('Throw away all preview changes and go back to what is on air?')) return;
+      await api('POST', `/api/outputs/${o.id}/revert`);
+      await loadState(); renderAll(); toast('Preview reverted');
+    }
+  }));
 
   const ol = $('#entries');
   ol.addEventListener('click', safe(async (e) => {
@@ -507,9 +797,9 @@ function wireOutput() {
       case 'hold': await api('PATCH', url, { hold: !entry.hold }); break;
       case 'reset': await api('PATCH', url, { resetTitle: true }); break;
       case 'remove': await api('DELETE', url); break;
-      case 'expiry': return openExpiry(o, entry);
+      case 'timing': return openTiming({ title: entryText(entry), timing: entry, tz: o.settings.clockTimezone, onSave: (t) => api('PATCH', url, t) });
       case 'category': return openCategoryPicker(o, entry);
-      case 'edit': return editHeadline(li, o, entry);
+      case 'edit': return entry.data ? openWeather(entry) : editHeadline(li, o, entry);
     }
     await loadState();
     renderAll();
@@ -517,7 +807,7 @@ function wireOutput() {
   ol.addEventListener('dblclick', (e) => {
     const hl = e.target.closest('.hl');
     const li = e.target.closest('.entry');
-    if (hl && li) { const o = currentOutput(); editHeadline(li, o, o.entries.find((x) => x.id === li.dataset.id)); }
+    if (hl && li) { const o = currentOutput(); const en = o.entries.find((x) => x.id === li.dataset.id); if (en && !en.data) editHeadline(li, o, en); else if (en) openWeather(en); }
   });
 
   // drag reorder + drop stories from the feeds
@@ -661,9 +951,10 @@ function askCategory(ev, { feedId, itemId, count = 1, breaking = false } = {}) {
 }
 
 // ------------------------------------------------------------ modals
-function modal(html, mount, { wide = false } = {}) {
+function modal(html, mount, { wide = false, xwide = false } = {}) {
   const dlg = $('#modal');
   dlg.classList.toggle('wide', wide);
+  dlg.classList.toggle('xwide', xwide);
   $('#modalBody').innerHTML = html;
   if (!dlg.open) dlg.showModal();
   $$('[data-close-modal]', dlg).forEach((b) => b.addEventListener('click', () => dlg.close()));
@@ -808,10 +1099,11 @@ function openSettings() {
   modal(`${head('Feeds &amp; settings')}
     <form id="setForm"><div class="dlg-body">
       <div class="section-title">General</div>
-      <div class="row2">
+      ${isAdmin() ? '' : '<div class="locked-note">🔒 Only an admin can change the refresh interval, automatic category guessing and the weather key. Your display preferences below are yours to change.</div>'}
+      <fieldset class="plain" ${isAdmin() ? '' : 'disabled'}><div class="row2">
         <label class="field"><span>Default refresh interval (minutes)</span><input name="refreshMinutes" type="number" min="1" value="${s.refreshMinutes}"></label>
         <label class="field"><span>Stories kept per feed</span><input name="maxItemsPerFeed" type="number" min="10" max="1000" value="${s.maxItemsPerFeed}"></label>
-      </div>
+      </div></fieldset>
       <label class="check"><input type="checkbox" name="showImages" ${prefs.showImages ? 'checked' : ''}> Show thumbnails in story lists</label>
       <label class="check"><input type="checkbox" name="compact" ${prefs.compact ? 'checked' : ''}> Compact story lists</label>
       <div class="section-title">Subscriptions (${st.feeds.length})</div>
@@ -821,9 +1113,14 @@ function openSettings() {
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">${(st.categories || []).map((c) => catChip(c)).join('')}
         <button type="button" class="btn small" id="setCats">Edit categories…</button></div>
       <label class="check" style="margin-top:12px"><input type="checkbox" name="askCategory" ${prefs.askCategory ? 'checked' : ''}> Ask for a category each time I add a story <span class="hint">— pop-up with number keys 1–9</span></label>
-      <label class="check"><input type="checkbox" name="autoCategorize" ${s.autoCategorize !== false ? 'checked' : ''}> Guess categories from RSS tags and links <span class="hint">— when off, only feed categories and your choices are used</span></label>
+      <fieldset class="plain" ${isAdmin() ? '' : 'disabled'}><label class="check"><input type="checkbox" name="autoCategorize" ${s.autoCategorize !== false ? 'checked' : ''}> Guess categories from RSS tags and links <span class="hint">— when off, only feed categories and your choices are used</span></label></fieldset>
+      <div class="admin-only"><div class="section-title">Live data (Open-Meteo weather)</div>
+      <label class="field"><span>Open-Meteo API key ${st.settings.openMeteoKeySet ? '<span class="tag new">SET ✓</span>' : '<span class="tag">NOT SET — free non-commercial API</span>'}</span>
+        <input name="openMeteoKey" type="password" placeholder="${st.settings.openMeteoKeyFromEnv ? 'Set by the OPENMETEO_API_KEY environment variable' : st.settings.openMeteoKeySet ? 'Leave empty to keep the current key' : 'Paste a key from open-meteo.com/en/pricing'}" autocomplete="off" ${st.settings.openMeteoKeyFromEnv ? 'disabled' : ''}>
+        <small>Open-Meteo’s free API is for non-commercial use. For a broadcast channel, take a commercial plan and paste its key here. The key stays on the LouiseTicker computer.</small></label>
+      ${st.settings.openMeteoKeySet && !st.settings.openMeteoKeyFromEnv ? '<label class="check"><input type="checkbox" name="clearKey"> Remove the key</label>' : ''}</div>
       <div class="section-title">Keyboard</div>
-      <div class="hint"><span class="kbd">/</span> search · <span class="kbd">R</span> refresh all · <span class="kbd">A</span> add feed · <span class="kbd">1</span>–<span class="kbd">9</span> switch tab · <span class="kbd">[</span> <span class="kbd">]</span> previous / next tab · <span class="kbd">S</span> split pane</div>
+      <div class="hint"><span class="kbd">Ctrl</span>+<span class="kbd">Enter</span> TAKE · <span class="kbd">/</span> search · <span class="kbd">R</span> refresh all · <span class="kbd">A</span> add feed · <span class="kbd">1</span>–<span class="kbd">9</span> switch tab · <span class="kbd">[</span> <span class="kbd">]</span> previous / next tab · <span class="kbd">S</span> split pane</div>
       <div class="section-title">For the ticker system</div>
       <div class="hint">Each output has its own RSS, JSON and plain-text address (see the links above the output list), plus a full-screen <b>Ticker</b> page usable as a browser source in OBS / vMix / CasparCG. ${st.server.lan ? `Reachable on your network at ${st.server.lanUrls.map(esc).join(', ')}.` : 'Only reachable from this computer — start with <b>start-lan.bat</b> to share it on your network.'}</div>
     </div>
@@ -835,7 +1132,11 @@ function openSettings() {
       prefs.showImages = form.showImages.checked;
       prefs.compact = form.compact.checked;
       prefs.askCategory = form.askCategory.checked;
-      await api('PATCH', '/api/settings', { refreshMinutes: form.refreshMinutes.value, maxItemsPerFeed: form.maxItemsPerFeed.value, autoCategorize: form.autoCategorize.checked });
+      const key = form.openMeteoKey.value.trim();
+      if (isAdmin()) await api('PATCH', '/api/settings', {
+        refreshMinutes: form.refreshMinutes.value, maxItemsPerFeed: form.maxItemsPerFeed.value, autoCategorize: form.autoCategorize.checked,
+        ...(key ? { openMeteoKey: key } : form.clearKey && form.clearKey.checked ? { openMeteoKey: '' } : {}),
+      });
       closeModal(); await loadState(); renderAll(); toast('Settings saved');
     }));
     $('#setAdd', dlg).addEventListener('click', openAddFeed);
@@ -873,6 +1174,8 @@ function openOutputSettings() {
   const cb = (name, label, hint = '') => `<label class="check"><input type="checkbox" name="${name}" ${s[name] ? 'checked' : ''}> ${label}${hint ? ` <span class="hint">— ${hint}</span>` : ''}</label>`;
   modal(`${head(`Output: ${esc(o.name)}`)}
     <form id="outForm"><div class="dlg-body">
+      ${isAdmin() ? '' : '<div class="locked-note">🔒 Only an admin can change the output’s name, formatting and mode. You can edit the automatic keyword rules at the bottom.</div>'}
+      <fieldset class="plain" ${isAdmin() ? '' : 'disabled'}>
       <div class="section-title">Feed</div>
       <div class="row2">
         <label class="field"><span>Output name</span><input name="name" value="${esc(o.name)}"></label>
@@ -893,7 +1196,9 @@ function openOutputSettings() {
       ${cb('breakingFirst', 'Breaking items always go first')}
       ${cb('newestFirst', 'Sort by publication time (newest first) instead of manual order')}
       ${cb('includeDescription', 'Include story summaries in the RSS/JSON output')}
+      <label class="check"><input type="checkbox" name="directMode" ${o.takeMode ? '' : 'checked'}> Direct mode <span class="hint">— no TAKE: every change goes on air immediately</span></label>
       <p class="hint">Ticker appearance, layout, display mode, source &amp; category labels and the clock are in the 🎨 Ticker designer.</p>
+      </fieldset>
       <div class="section-title">Automatic rules</div>
       <label class="field"><span>Auto-add keywords</span><textarea name="include" placeholder="one per line or comma separated — e.g. earthquake, election, Paris">${esc(r.include.join('\n'))}</textarea>
         <small>New stories (last 12h) whose headline or summary contain one of these are added automatically. Use * as wildcard (elect* ). Matches are highlighted in the story lists.</small></label>
@@ -902,7 +1207,7 @@ function openOutputSettings() {
         <small>None ticked = all feeds.</small></div>
       <label class="field"><span>Block keywords</span><textarea name="block" placeholder="stories containing these are never auto-added and are dimmed in lists">${esc(r.block.join('\n'))}</textarea></label>
     </div>
-    <div class="dlg-foot"><button type="button" class="btn danger" id="delOut" ${st.outputs.length <= 1 ? 'disabled title="At least one output is needed"' : ''}>Delete output</button>
+    <div class="dlg-foot"><button type="button" class="btn danger admin-only" id="delOut" ${st.outputs.length <= 1 ? 'disabled title="At least one output is needed"' : ''}>Delete output</button>
       <div class="right"><button type="button" class="btn" data-close-modal>Cancel</button><button class="btn primary">Save</button></div></div></form>`,
   (dlg) => {
     const form = $('#outForm', dlg);
@@ -915,8 +1220,9 @@ function openOutputSettings() {
         if (typeof st.defaults[k] === 'boolean') settings[k] = form.elements[k].checked;
         else if (fd.has(k)) settings[k] = fd.get(k);
       }
-      await api('PATCH', `/api/outputs/${o.id}`, {
-        name: fd.get('name'), settings,
+      const rules = { include: fd.get('include'), block: fd.get('block'), includeFeeds: fd.getAll('includeFeeds') };
+      await api('PATCH', `/api/outputs/${o.id}`, !isAdmin() ? { rules } : {
+        name: fd.get('name'), settings, takeMode: !form.elements.directMode.checked,
         rules: { include: fd.get('include'), block: fd.get('block'), includeFeeds: fd.getAll('includeFeeds') },
       });
       closeModal(); await loadState(); renderAll(); toast('Output saved');
@@ -964,7 +1270,7 @@ function openDesigner() {
   modal(`${head(`Ticker designer · ${esc(o.name)}`)}
     <form id="designForm" autocomplete="off"><div class="dlg-body" style="padding:16px 18px"><div class="designer">
       <div>
-        <div class="stage-wrap" id="stageWrap"><iframe id="stageFrame" title="Ticker preview" src="/ticker?out=${encodeURIComponent(o.id)}&stage=1"></iframe></div>
+        <div class="stage-wrap" id="stageWrap"><iframe id="stageFrame" title="Ticker preview" src="/ticker?out=${encodeURIComponent(o.id)}&stage=1&view=preview"></iframe></div>
         <div class="stage-note"><span>Live preview at 1920×1080. Sample headlines appear when nothing is on air. Nothing changes on air until you save.</span></div>
         <div class="themes">${THEMES.map(([n, c], i) => `<button type="button" class="theme" data-theme="${i}"><i style="background:${c}"></i><span>${n}</span></button>`).join('')}</div>
         <div class="field" style="margin-top:16px"><span>Browser-source URL (OBS / vMix / CasparCG: set the source to 1920×1080)</span>
@@ -1217,19 +1523,182 @@ function openCategoryPicker(o, entry) {
   });
 }
 
-function openExpiry(o, entry) {
-  const opts = [[15, '15 min'], [30, '30 min'], [60, '1 hour'], [120, '2 hours'], [360, '6 hours'], [720, '12 hours'], [1440, '24 hours']];
-  modal(`${head('Take off air automatically')}
-    <div class="dlg-body"><div class="hint" style="margin-bottom:12px">${esc(entry.title)}</div>
-      <div class="presets">${opts.map(([m, l]) => `<button class="preset" data-min="${m}">in ${l}</button>`).join('')}<button class="preset" data-min="0">Never expire</button></div>
-      ${entry.expiresAt ? `<p class="hint">Currently: ${timeLeft(entry.expiresAt)} (${new Date(entry.expiresAt).toLocaleTimeString()})</p>` : ''}
-    </div>`,
+// ------------------------------------------------------------ timing (scheduling)
+const toLocalInput = (ts) => new Date(ts - new Date(ts).getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+
+// Timing chosen with ⏰ before adding a custom line.
+let pendingTiming = null;
+function setPendingTiming(t) {
+  pendingTiming = t;
+  $('#customTiming').classList.toggle('on', !!t);
+  $('#customTimingInfo').textContent = t ? `⏰ next line: ${schedule.describe(t)}` : '';
+}
+
+/** Start / end / daily-window editor. onSave receives { startsAt, expiresAt, repeat }. */
+function openTiming({ title, timing = {}, tz, onSave }) {
+  const t = timing;
+  const soon = Math.ceil((Date.now() + 3600e3) / 900e3) * 900e3; // next quarter hour, an hour from now
+  const rep = t.repeat || { from: '07:00', to: '09:00', days: [1, 2, 3, 4, 5] };
+  const days = [1, 2, 3, 4, 5, 6, 0];
+  const radio = (name, value, checked, label) => `<label class="check" style="margin:0"><input type="radio" name="${name}" value="${value}" ${checked ? 'checked' : ''}> ${label}</label>`;
+  const afterOpts = [[15, '15 min'], [30, '30 min'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [360, '6 hours'], [720, '12 hours'], [1440, '24 hours']];
+  modal(`${head('Timing')}
+    <form id="timingForm" class="timing"><div class="dlg-body">
+      <div class="hint" style="margin:-4px 0 12px">${esc(title)}</div>
+      <fieldset><legend>Start</legend>
+        <div class="optrow">${radio('start', 'now', !t.startsAt, 'Now')}</div>
+        <div class="optrow">${radio('start', 'at', !!t.startsAt, 'At')}<input type="datetime-local" name="startAt" value="${toLocalInput(t.startsAt || soon)}"></div>
+      </fieldset>
+      <fieldset><legend>End</legend>
+        <div class="optrow">${radio('end', 'never', !t.expiresAt, 'No end')}</div>
+        <div class="optrow">${radio('end', 'after', false, 'After')}<select name="afterMin">${afterOpts.map(([m, l]) => `<option value="${m}" ${m === 60 ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="optrow">${radio('end', 'at', !!t.expiresAt, 'At')}<input type="datetime-local" name="endAt" value="${toLocalInput(t.expiresAt || soon + 3600e3)}"></div>
+      </fieldset>
+      <fieldset><legend>Daily window</legend>
+        <label class="check"><input type="checkbox" name="repeatOn" ${t.repeat ? 'checked' : ''}> Only on air between</label>
+        <div class="optrow"><input type="time" name="from" value="${esc(rep.from)}"> and <input type="time" name="to" value="${esc(rep.to)}"> <span class="hint">same time twice = all day; 22:00–02:00 runs past midnight</span></div>
+        <div class="optrow daypick">${days.map((d) => `<label><input type="checkbox" name="day" value="${d}" ${rep.days.includes(d) ? 'checked' : ''}>${schedule.DAY_NAMES[d]}</label>`).join('')}
+          <button type="button" class="btn small" data-days="1,2,3,4,5">Weekdays</button><button type="button" class="btn small" data-days="6,0">Weekends</button><button type="button" class="btn small" data-days="0,1,2,3,4,5,6">Every day</button></div>
+        <div class="hint">Daily windows follow the ticker clock: <b>${esc(tz || 'local time of the LouiseTicker computer')}</b>. Start and end dates use this computer’s time.</div>
+      </fieldset>
+      <div class="summary" id="timingSummary"></div>
+      <div class="err-msg" id="timingErr"></div>
+    </div>
+    <div class="dlg-foot"><button type="button" class="btn" id="timingClear">Clear timing</button>
+      <div class="right"><button type="button" class="btn" data-close-modal>Cancel</button><button class="btn primary">Save</button></div></div></form>`,
   (dlg) => {
-    $$('[data-min]', dlg).forEach((b) => b.addEventListener('click', safe(async () => {
-      const m = +b.dataset.min;
-      await api('PATCH', `/api/outputs/${o.id}/entries/${entry.id}`, { expiresAt: m ? Date.now() + m * 60000 : null });
+    const form = $('#timingForm', dlg);
+    const F = form.elements;
+    const build = () => {
+      const startsAt = F.start.value === 'at' ? Date.parse(F.startAt.value) || null : null;
+      let expiresAt = null;
+      if (F.end.value === 'after') expiresAt = (startsAt || Date.now()) + +F.afterMin.value * 60000;
+      if (F.end.value === 'at') expiresAt = Date.parse(F.endAt.value) || null;
+      const repeat = F.repeatOn.checked ? { from: F.from.value, to: F.to.value, days: $$('[name=day]:checked', form).map((x) => +x.value) } : null;
+      return { startsAt, expiresAt, repeat };
+    };
+    const update = () => {
+      const b = build();
+      const sc = schedule.status(b, Date.now(), tz);
+      const desc = schedule.describe(b);
+      $('#timingSummary', dlg).innerHTML = `${desc ? `⏰ ${esc(desc)}` : 'Always on air (no timing)'} · <b>${sc.state === 'on' ? 'would be on air now' : esc(sc.text)}</b>`;
+      $('#timingErr', dlg).textContent = b.expiresAt && b.startsAt && b.expiresAt <= b.startsAt ? 'The end must be after the start.' : b.repeat && !b.repeat.days.length ? 'Pick at least one day.' : '';
+    };
+    form.addEventListener('input', update);
+    form.addEventListener('change', update);
+    // typing a date selects its option
+    F.startAt.addEventListener('input', () => { F.start.value = 'at'; update(); });
+    F.endAt.addEventListener('input', () => { F.end.value = 'at'; update(); });
+    F.afterMin.addEventListener('change', () => { F.end.value = 'after'; update(); });
+    $$('[data-days]', dlg).forEach((b) => b.addEventListener('click', () => {
+      const set = b.dataset.days.split(',').map(Number);
+      $$('[name=day]', form).forEach((x) => { x.checked = set.includes(+x.value); });
+      F.repeatOn.checked = true;
+      update();
+    }));
+    update();
+    const save = safe(async (vals) => { await onSave(vals); closeModal(); await loadState(); renderAll(); });
+    $('#timingClear', dlg).addEventListener('click', () => save({ startsAt: null, expiresAt: null, repeat: null }));
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      update();
+      if ($('#timingErr', dlg).textContent) return;
+      save(build());
+    });
+  });
+}
+
+// ------------------------------------------------------------ live data: weather (Open-Meteo)
+function openWeather(entry) {
+  const o = currentOutput();
+  const cfg = entry ? JSON.parse(JSON.stringify(entry.data)) : {
+    type: 'weather', title: '', locations: [], layout: 'combined', fields: { now: true, today: true, tomorrow: false, wind: false }, units: 'C', lang: 'fr', emoji: true,
+  };
+  const seg = (name, opts, val) => `<div class="seg">${opts.map(([v, l]) => `<label><input type="radio" name="${name}" value="${v}" ${val === v ? 'checked' : ''}>${l}</label>`).join('')}</div>`;
+  const chk = (name, label) => `<label class="check"><input type="checkbox" name="${name}" ${cfg.fields[name] ? 'checked' : ''}> ${label}</label>`;
+  modal(`${head(entry ? 'Live weather line' : 'Add live weather')}
+    <form id="wxForm" autocomplete="off"><div class="dlg-body">
+      <label class="field"><span>Places</span><input id="wxSearch" placeholder="Search a city… e.g. Paris, Lyon, Genève"></label>
+      <div class="wx-results" id="wxResults"></div>
+      <div class="wx-places" id="wxPlaces"></div>
+      <div class="row2">
+        <div class="field"><span>Layout</span>${seg('layout', [['combined', 'One line'], ['perCity', 'One line per place']], cfg.layout)}</div>
+        <label class="field" id="wxTitleField"><span>Line title</span><input name="title" value="${esc(cfg.title)}" placeholder="Météo / Weather" maxlength="30"></label>
+      </div>
+      <div class="field"><span>Show</span><div style="display:flex;gap:4px 18px;flex-wrap:wrap">${chk('now', 'Now (temperature + sky)')}${chk('today', 'Today min / max')}${chk('tomorrow', 'Tomorrow')}${chk('wind', 'Wind')}</div></div>
+      <div class="row3">
+        <div class="field"><span>Units</span>${seg('units', [['C', '°C'], ['F', '°F']], cfg.units)}</div>
+        <div class="field"><span>Language</span>${seg('lang', [['fr', 'Français'], ['en', 'English']], cfg.lang)}</div>
+        <label class="check" style="align-self:end;margin-bottom:16px"><input type="checkbox" name="emoji" ${cfg.emoji ? 'checked' : ''}> Weather icons ☀️⛅🌧️</label>
+      </div>
+      <div class="field"><span>Ticker text (live)</span><div class="wx-preview" id="wxPreview"><span class="hint">Add a place to see the text.</span></div></div>
+      <p class="hint">Updates every 10 minutes and goes on air without TAKE once the line is on air. Data: <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a>${st.settings.openMeteoKeySet ? ' (your API key)' : ' — the free API is for non-commercial use; for broadcast, add an Open-Meteo API key in ⚙ Settings'}.</p>
+    </div>
+    <div class="dlg-foot"><span></span><div class="right"><button type="button" class="btn" data-close-modal>Cancel</button><button class="btn primary">${entry ? 'Save' : o.takeMode ? 'Add to preview' : 'Add'}</button></div></div></form>`,
+  (dlg) => {
+    const form = $('#wxForm', dlg);
+    const F = form.elements;
+    const gather = () => {
+      cfg.layout = F.layout.value; cfg.title = F.title.value.trim(); cfg.units = F.units.value; cfg.lang = F.lang.value; cfg.emoji = F.emoji.checked;
+      cfg.fields = { now: F.now.checked, today: F.today.checked, tomorrow: F.tomorrow.checked, wind: F.wind.checked };
+      return cfg;
+    };
+    const renderPlaces = () => {
+      $('#wxPlaces', dlg).innerHTML = cfg.locations.map((l, i) => `<span class="wx-place">${esc(l.name)}${i ? `<button type="button" data-left="${i}" title="Move left">◀</button>` : ''}<button type="button" data-del="${i}" title="Remove">✕</button></span>`).join('') || '<span class="hint">No places yet.</span>';
+    };
+    let pt = null;
+    const preview = () => {
+      gather();
+      $('#wxTitleField', dlg).style.visibility = cfg.layout === 'combined' ? '' : 'hidden';
+      clearTimeout(pt);
+      if (!cfg.locations.length) { $('#wxPreview', dlg).innerHTML = '<span class="hint">Add a place to see the text.</span>'; return; }
+      pt = setTimeout(safe(async () => {
+        $('#wxPreview', dlg).innerHTML = '<span class="hint">Loading…</span>';
+        const r = await api('POST', '/api/weather/preview', { data: cfg });
+        $('#wxPreview', dlg).innerHTML = r.lines.length ? r.lines.map(esc).join('<br>') : `<span class="hint">${esc(r.error || 'No data')}</span>`;
+        if (r.error && r.lines.length) $('#wxPreview', dlg).insertAdjacentHTML('beforeend', `<br><span class="hint">⚠ ${esc(r.error)} (showing last values)</span>`);
+      }), 350);
+    };
+    let st2 = null;
+    $('#wxSearch', dlg).addEventListener('input', (e) => {
+      clearTimeout(st2);
+      const q = e.target.value.trim();
+      if (q.length < 2) { $('#wxResults', dlg).innerHTML = ''; return; }
+      st2 = setTimeout(safe(async () => {
+        const res = await api('GET', `/api/weather/geocode?q=${encodeURIComponent(q)}&lang=${F.lang.value}`);
+        $('#wxResults', dlg).innerHTML = res.map((p, i) => `<button type="button" data-pick="${i}">${esc(p.name)}<small>${esc([p.admin1, p.country].filter(Boolean).join(', '))}</small></button>`).join('') || '<span class="hint">No place found.</span>';
+        $('#wxResults', dlg).onclick = (ev) => {
+          const b = ev.target.closest('[data-pick]');
+          if (!b) return;
+          const p = res[+b.dataset.pick];
+          if (!cfg.locations.some((l) => l.lat === p.lat && l.lon === p.lon)) cfg.locations.push({ name: p.name, lat: p.lat, lon: p.lon });
+          $('#wxSearch', dlg).value = ''; $('#wxResults', dlg).innerHTML = '';
+          renderPlaces(); preview();
+          $('#wxSearch', dlg).focus();
+        };
+      }), 300);
+    });
+    // Enter in the search box picks the first suggestion instead of submitting
+    $('#wxSearch', dlg).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#wxResults [data-pick]', dlg)?.click(); } });
+    $('#wxPlaces', dlg).addEventListener('click', (e) => {
+      const del = e.target.closest('[data-del]'), left = e.target.closest('[data-left]');
+      if (del) cfg.locations.splice(+del.dataset.del, 1);
+      if (left) { const i = +left.dataset.left; [cfg.locations[i - 1], cfg.locations[i]] = [cfg.locations[i], cfg.locations[i - 1]]; }
+      renderPlaces(); preview();
+    });
+    form.addEventListener('change', preview);
+    form.addEventListener('input', (e) => { if (e.target.name === 'title') preview(); });
+    renderPlaces(); preview();
+    form.addEventListener('submit', safe(async (e) => {
+      e.preventDefault();
+      gather();
+      if (!cfg.locations.length) return toast('Add at least one place', true);
+      if (entry) await api('PATCH', `/api/outputs/${o.id}/entries/${entry.id}`, { data: cfg });
+      else await api('POST', `/api/outputs/${o.id}/entries`, { data: cfg, ...(pendingTiming || {}) });
+      if (!entry) setPendingTiming(null);
       closeModal(); await loadState(); renderAll();
-    })));
+      toast(entry ? 'Weather line updated' : o.takeMode ? 'Weather line added to preview — press TAKE' : 'Weather line added');
+    }));
   });
 }
 
@@ -1261,6 +1730,7 @@ function wireTop() {
   }));
 
   document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !$('#modal').open) { e.preventDefault(); take(); return; }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.target.closest('input, textarea, select, [contenteditable="true"]') || $('#modal').open) return;
     const i = prefs.focused;
@@ -1277,9 +1747,13 @@ function wireTop() {
 
 // ------------------------------------------------------------ boot
 (async function boot() {
+  wireAccount();
   wireTop();
   wireOutput();
   try {
+    const { user } = await api('GET', '/api/me');
+    if (!user) return showLogin();
+    setMe(user);
     await loadState();
     await loadItems();
   } catch (e) {

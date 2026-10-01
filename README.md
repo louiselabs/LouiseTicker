@@ -7,9 +7,9 @@ No dependencies: all you need is [Node.js](https://nodejs.org) 18 or newer.
 ## Start
 
 - Double-click **`start.bat`**, or run `npm start`
-- Open <http://localhost:4400>
+- Open <http://localhost:4400> and log in. The first start creates two accounts, **admin / password** and **journalist / password**. Change both passwords straight away (account menu, top right).
 
-Use **`start-lan.bat`** (or `npm run start:lan`) when the ticker or playout machine is a different computer. The feeds and ticker page can then be reached on your network, and editing is still only allowed from this computer.
+Use **`start-lan.bat`** (or `npm run start:lan`) when the ticker or playout machine is a different computer. The control panel, feeds and ticker page can then be reached on your network. Everyone logs in with their own account. The connection is plain HTTP, so use this on a trusted studio network only.
 
 Your data is saved in `data/louiseticker.json`.
 
@@ -21,7 +21,8 @@ Your data is saved in `data/louiseticker.json`.
 4. The **output panel** on the right is your ticker playlist:
    - drag to reorder
    - double-click a headline (or ✎) to rewrite it for air; ↺ restores the original
-   - ⚡ breaking · ⏸ hold (keep it in the list but off air) · ⏱ auto-expire · ✕ remove
+   - ⚡ breaking · ⏸ hold (keep it in the list but off air) · ⏰ timing · ✕ remove
+   - changes wait in the preview until you press **TAKE** (see below)
    - type **custom lines** (weather, promos, "coming up…") that aren't from any feed
 5. Point the ticker system at the output URL shown above the list.
 
@@ -42,6 +43,33 @@ You can have several outputs, for example *Main*, *Sport* and *Breaking only*. E
 - **block keywords**: stories that match are never auto-added and are dimmed in the lists
 
 "Copy to output…" copies the current playlist into another output.
+
+### Preview → TAKE
+Edits don't go straight to air. The output list is the **preview**, and the ticker, RSS, JSON and TXT outputs show the **program** (what is on air). It works like a vision mixer:
+
+- Items in the list are marked **NEW** or **CHANGED** compared with what is on air. Items that will disappear are listed under "Removed on TAKE".
+- Press **TAKE** (or `Ctrl+Enter`) to put the preview on air. The button shows how many changes are waiting and pulses while there are some. **Revert** throws the preview changes away.
+- The bottom of the window is a two-row multiviewer: **PVW** (preview) above **PGM** (on air).
+- Some things go on air without TAKE: schedule windows opening and closing, end times, live weather values, and feed label or colour changes.
+- If you prefer the old behaviour, tick **Direct mode** in ⚙ output settings.
+
+### Timing (scheduling)
+Click **⏰** on any item, or before adding a custom line, to set:
+- **Start**: now, or at a date and time.
+- **End**: never, after 15 min to 24 h, or at a date and time.
+- **Daily window**: e.g. 07:00–09:00 on weekdays. A window can run past midnight (22:00–02:00), and the same time twice means all day.
+
+Each item shows its timing and whether it is on air now. Items outside their window are dimmed. Daily windows follow the ticker clock's time zone (set in the designer). Scheduled items go on and off air by themselves, within about 20 seconds.
+
+### Live weather (Open-Meteo)
+**🌤 ＋ Live weather** adds a line that keeps itself up to date:
+- Search for places and add several.
+- Choose one combined line ("Météo : Paris 21° 🌤️ (16°/21°) · Lyon 21° ☁️") or one line per place.
+- Choose what to show: now, today's min/max, tomorrow, wind. Units are °C/°F, the language French or English, and icons can be switched on or off.
+
+The text refreshes every 10 minutes. If Open-Meteo is unreachable, the last values stay on air. Click ✎ on the line to change it.
+
+Open-Meteo's free API is for **non-commercial use**. For a broadcast channel, take a commercial plan at open-meteo.com and paste the key in **⚙ Settings → Live data**, or set the `OPENMETEO_API_KEY` environment variable. The key stays on the LouiseTicker computer.
 
 ### Categories
 Stories can carry a ticker category such as *Sport*, *Weather* or *Politics*, each with its own colour. Categories are set in three ways, and the earlier ones in this list win:
@@ -96,6 +124,41 @@ The URL options below override the designer settings for one screen only:
 - The label switches to the breaking label and pulses while breaking items are on air.
 - Changes appear live. In crawl mode they wait for the end of a scroll loop so the text never jumps, and in one-at-a-time mode they appear with the next headline.
 
+## Accounts and roles
+Everyone logs in with a username and password. There are two roles:
+
+| | Journalist | Admin |
+|---|:-:|:-:|
+| Browse feeds, pick, edit, reorder and remove stories, breaking, hold, timing | ✓ | ✓ |
+| Custom lines and live weather lines | ✓ | ✓ |
+| **TAKE** / Revert | ✓ | ✓ |
+| Subscribe to feeds, edit feeds, import OPML | ✓ | ✓ |
+| Categories (on stories and the category list) | ✓ | ✓ |
+| Keyword rules (auto-add / block) | ✓ | ✓ |
+| Copy items to another output, read the as-run log | ✓ | ✓ |
+| Global settings (refresh interval, category guessing, Open-Meteo key) | | ✓ |
+| Create / delete outputs, output formatting, Direct mode | | ✓ |
+| Ticker designer (look, layout, display mode, labels, clock) | | ✓ |
+| Accounts: create journalists or admins, reset passwords, disable, delete | | ✓ |
+| Export the as-run log as CSV | | ✓ |
+
+Some details:
+- Admins manage accounts from the account menu (top right) → **Manage accounts…**. Everyone can change their own password there.
+- Disabling an account, deleting it or resetting its password logs it out everywhere. LouiseTicker always keeps at least one active admin.
+- Passwords are stored as salted scrypt hashes. Sessions last 12 hours from your last action, and survive a restart of LouiseTicker.
+- After 10 wrong passwords from one address, logging in from there is paused for 10 minutes.
+- The ticker system's addresses (`/out/…` and `/ticker`) stay public, so OBS, vMix and CasparCG need no login.
+
+## As-run log
+**📋 As-run** shows who did what and what went on air, newest first. You can filter by day, type, output, account or text. Admins can export it as CSV (opens in Excel). It records:
+- **TAKEs**: who, when, what went on and off, and the full list now on air.
+- **Scheduled items** going on or off air, and items reaching their end time (account *system*).
+- Stories added, edited, removed or reordered, including headline rewrites, breaking, hold, category and timing changes. Stories added by keyword rules are recorded as *keyword rule*.
+- Logins, logouts and failed logins (with the address), and password and account changes.
+- Feeds, categories, keyword rules, settings, outputs and design changes.
+
+Each item in the output list also shows who added it and who last edited it. The log is stored in `data/louiseticker-asrun.jsonl`, one line per event, and is never trimmed automatically.
+
 ## Keyboard
 `/` search · `R` refresh all · `A` add feed · `S` split · `1`–`9` switch tab · `[` `]` previous / next tab
 
@@ -103,7 +166,6 @@ The URL options below override the designer settings for one screen only:
 - `PORT` (default `4400`)
 - `LAN=1`: listen on all network interfaces
 - `HOST`: the address to listen on
-- `ALLOW_REMOTE_ADMIN=1`: also allow editing from other machines. There is no login, so use this only on a trusted network.
 - `DATA_FILE`: where the data is stored
 
 ## Tests
